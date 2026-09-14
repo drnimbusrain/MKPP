@@ -48,6 +48,7 @@ main() {
         "mechanisms/openatmos/saprcnov/mechanism.json"
         "mechanisms/openatmos/saprc99_mini/mechanism.json"
         "mechanisms/openatmos/ts1/mechanism.json"
+        "mechanisms/openatmos/cracmm2/mechanism.json"
     )
 
     local mech

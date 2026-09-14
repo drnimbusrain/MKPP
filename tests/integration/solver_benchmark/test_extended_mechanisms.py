@@ -41,3 +41,18 @@ def test_generated_micm_bindings_are_sourced_from_openatmos_and_keep_ep_lambdas(
     assert "Generated from canonical OpenAtmos JSON" in saprc99
     assert "LambdaRateConstantParameters" in saprc99
     assert "c.air_density_" in saprc99
+
+
+def test_cracmm2_is_pinned_to_epa_source_and_preserves_multiphase_catalog() -> None:
+    document = mechanism("cracmm2")
+    assert document["metadata"]["source_commit"] == "8a71fdbfb2183a1e37a53eb237e265d12f09b245"
+    assert len(document["species"]) == 271
+    assert len(document["reactions"]) == 531
+    assert {reaction["type"] for reaction in document["reactions"]} >= {
+        "ARRHENIUS",
+        "HETEROGENEOUS",
+        "PHOTOLYSIS",
+        "UNKNOWN",
+    }
+    assert len(document["metadata"]["photolysis_host_forcing_expressions"]) == 2
+    assert {entry["phase"] for entry in document["species"]} >= {"gas", "aerosol"}

@@ -18,5 +18,6 @@ target_link_libraries(
           e2e_gocart_compiled_kernels
           e2e_saprc99_compiled_kernels
           e2e_saprcnov_compiled_kernels
-          e2e_saprc99_mini_compiled_kernels)
+            e2e_saprc99_mini_compiled_kernels
+            e2e_cracmm2_compiled_kernels)
 add_test(NAME test_host_dispatcher COMMAND test_host_dispatcher)

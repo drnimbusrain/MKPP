@@ -277,9 +277,12 @@ def _evaluate_reaction_fluxes(mech: MechanismDefinition) -> dict[str, Any]:
             flux = K1 + K2 * species_symbols.get("AIR", species_symbols.get("M", M_density))
 
         elif rtype == "HETEROGENEOUS":
-            gamma = parse_sym_or_val(p["gamma"])
-            k_het = 0.25 * gamma * v_gas * S_a
-            flux = k_het
+            if "rate_name" in p:
+                flux = sp.Symbol(f"Rate_{idx}", real=True, nonnegative=True)
+            else:
+                gamma = parse_sym_or_val(p["gamma"])
+                k_het = 0.25 * gamma * v_gas * S_a
+                flux = k_het
 
         elif rtype == "PHASE_CHANGE":
             flux = sp.Symbol(f"Rate_{idx}", real=True)
@@ -295,7 +298,9 @@ def _evaluate_reaction_fluxes(mech: MechanismDefinition) -> dict[str, Any]:
                 flux = sp.Symbol(f"Rate_{idx}", real=True)
 
         else:
-            if "A" in p:
+            if "rate_name" in p:
+                flux = sp.Symbol(f"Rate_{idx}", real=True, nonnegative=True)
+            elif "A" in p:
                 flux = parse_sym_or_val(p["A"])
             elif "Y_spline" in p:
                 flux = parse_sym_or_val(p["Y_spline"])
