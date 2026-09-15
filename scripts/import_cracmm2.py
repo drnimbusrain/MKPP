@@ -14,7 +14,6 @@ import json
 import re
 from pathlib import Path
 
-
 SOURCE_COMMIT = "8a71fdbfb2183a1e37a53eb237e265d12f09b245"
 TERM = re.compile(r"(?P<sign>[+-]?)\s*(?:(?P<coef>\d+(?:\.\d*)?|\.\d+)(?:\s*\*\s*)?)?(?P<name>[A-Za-z][A-Za-z0-9_]*)")
 ARRHENIUS = re.compile(r"^\s*([0-9.+-Ee]+)\s*\*?\s*exp\s*\(\s*([+-]?[0-9.]+)\s*/\s*T\s*\)\s*$", re.I)
