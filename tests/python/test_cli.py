@@ -1,5 +1,6 @@
 import pytest
 from mkpp.cli import main
+from mkpp.parser import parse_mechanism_micm
 
 
 def test_cli_help(capsys):
@@ -195,7 +196,6 @@ def test_cli_compile_json_files(tmp_path, capsys, monkeypatch):
 def test_cli_dry_run_no_output_files(tmp_path, capsys, monkeypatch):
     """Test: --dry-run does not produce output files (Req 1.5)."""
     import os
-    from types import SimpleNamespace
 
     import mkpp.validation
 
@@ -208,7 +208,7 @@ def test_cli_dry_run_no_output_files(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(os, "getcwd", lambda: "/")
 
     # Mock load_mechanism to return a dummy mechanism
-    dummy_mech = SimpleNamespace(species=[{"name": "O3"}, {"name": "NO2"}], reactions=[])
+    dummy_mech = parse_mechanism_micm("test", {"species": [{"name": "O3"}, {"name": "NO2"}], "reactions": []})
     monkeypatch.setattr("mkpp.cli.load_mechanism", lambda *args, **kwargs: dummy_mech)
 
     # Mock validation functions to pass
@@ -248,7 +248,6 @@ def test_cli_dry_run_no_output_files(tmp_path, capsys, monkeypatch):
 def test_cli_verbose_emits_stage_markers(tmp_path, capsys, monkeypatch):
     """Test: --verbose emits stage markers to stderr (Req 1.6)."""
     import os
-    from types import SimpleNamespace
 
     mech_file = tmp_path / "mech.yaml"
     mech_file.write_text("species: [{name: O3}]\nreactions: []")
@@ -259,12 +258,7 @@ def test_cli_verbose_emits_stage_markers(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(os, "getcwd", lambda: "/")
 
     # Mock pipeline internals
-    dummy_mech = SimpleNamespace(
-        species=[{"name": "O3"}],
-        reactions=[],
-        partition_metadata=None,
-        sympy_metadata=None,
-    )
+    dummy_mech = parse_mechanism_micm("test", {"species": [{"name": "O3"}], "reactions": []})
     monkeypatch.setattr("mkpp.cli.load_mechanism", lambda *args, **kwargs: dummy_mech)
     monkeypatch.setattr("mkpp.cli.validate_mechanism", lambda *args, **kwargs: None)
     monkeypatch.setattr("mkpp.cli.validate_mpi_safety", lambda *args, **kwargs: None)
@@ -308,7 +302,6 @@ def test_cli_verbose_emits_stage_markers(tmp_path, capsys, monkeypatch):
 def test_cli_adjoint_flag_threads_to_generate_headers(tmp_path, capsys, monkeypatch):
     """Test: --adjoint flag is parsed and passed to generate_headers (Req 6.1)."""
     import os
-    from types import SimpleNamespace
 
     import mkpp.validation
 
@@ -320,12 +313,7 @@ def test_cli_adjoint_flag_threads_to_generate_headers(tmp_path, capsys, monkeypa
 
     monkeypatch.setattr(os, "getcwd", lambda: "/")
 
-    dummy_mech = SimpleNamespace(
-        species=[{"name": "O3"}],
-        reactions=[],
-        partition_metadata=None,
-        sympy_metadata=None,
-    )
+    dummy_mech = parse_mechanism_micm("test", {"species": [{"name": "O3"}], "reactions": []})
     monkeypatch.setattr("mkpp.cli.load_mechanism", lambda *args, **kwargs: dummy_mech)
     monkeypatch.setattr("mkpp.cli.validate_mechanism", lambda *args, **kwargs: None)
     monkeypatch.setattr("mkpp.cli.validate_mpi_safety", lambda *args, **kwargs: None)
@@ -365,7 +353,6 @@ def test_cli_adjoint_flag_threads_to_generate_headers(tmp_path, capsys, monkeypa
 def test_cli_adjoint_flag_defaults_to_false(tmp_path, capsys, monkeypatch):
     """Test: without --adjoint flag, adjoint defaults to False (Req 6.1)."""
     import os
-    from types import SimpleNamespace
 
     import mkpp.validation
 
@@ -377,12 +364,7 @@ def test_cli_adjoint_flag_defaults_to_false(tmp_path, capsys, monkeypatch):
 
     monkeypatch.setattr(os, "getcwd", lambda: "/")
 
-    dummy_mech = SimpleNamespace(
-        species=[{"name": "O3"}],
-        reactions=[],
-        partition_metadata=None,
-        sympy_metadata=None,
-    )
+    dummy_mech = parse_mechanism_micm("test", {"species": [{"name": "O3"}], "reactions": []})
     monkeypatch.setattr("mkpp.cli.load_mechanism", lambda *args, **kwargs: dummy_mech)
     monkeypatch.setattr("mkpp.cli.validate_mechanism", lambda *args, **kwargs: None)
     monkeypatch.setattr("mkpp.cli.validate_mpi_safety", lambda *args, **kwargs: None)

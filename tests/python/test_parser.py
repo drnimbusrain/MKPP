@@ -2,6 +2,7 @@ import json
 import time
 
 import pytest
+import yaml
 from mkpp.model import CompilationError
 from mkpp.parser import (
     detect_config_format,
@@ -9,6 +10,15 @@ from mkpp.parser import (
     load_mechanism,
     parse_mechanism_micm,
 )
+
+
+@pytest.fixture(params=["SafeLoader", "CSafeLoader"])
+def safe_yaml_loader(request, monkeypatch):
+    """Exercise both safe YAML implementations when LibYAML is available."""
+    loader = getattr(yaml, request.param, None)
+    if loader is None:
+        pytest.skip("PyYAML was built without LibYAML")
+    monkeypatch.setattr("mkpp.parser._SAFE_YAML_LOADER", loader)
 
 
 def test_parse_complex_troe_parameters():
@@ -204,7 +214,7 @@ initial_concentrations:
     assert env.initial_concentrations["O3"] == 1e-6
 
 
-def test_load_mechanism_and_environment_json_parity(tmp_path):
+def test_load_mechanism_and_environment_json_parity(tmp_path, safe_yaml_loader):
     mech_dict = {
         "species": [{"name": "O3"}, {"name": "NO"}, {"name": "NO2"}],
         "reactions": [
@@ -232,8 +242,6 @@ def test_load_mechanism_and_environment_json_parity(tmp_path):
     yaml_env = tmp_path / "env.yaml"
     json_env = tmp_path / "env.json"
 
-    import yaml
-
     yaml_mech.write_text(yaml.dump(mech_dict))
     json_mech.write_text(json.dumps(mech_dict))
     yaml_env.write_text(yaml.dump(env_dict))
@@ -250,6 +258,20 @@ def test_load_mechanism_and_environment_json_parity(tmp_path):
     e_json = load_environment(json_env)
 
     assert e_yaml == e_json
+
+
+@pytest.mark.parametrize("load_config", [load_mechanism, load_environment])
+@pytest.mark.parametrize("document", ["species: [ unclosed_list", "!!python/object/apply:builtins.str [unsafe]"])
+def test_yaml_loaders_reject_invalid_documents(tmp_path, safe_yaml_loader, load_config, document):
+    config_path = tmp_path / "invalid.yaml"
+    config_path.write_text(document)
+
+    with pytest.raises(CompilationError) as exc_info:
+        load_config(config_path)
+
+    assert exc_info.value.stage == "parsing"
+    assert "YAML syntax error" in exc_info.value.message
+    assert exc_info.value.yaml_location.startswith(f"{config_path}:")
 
 
 def test_reject_invalid_or_legacy_formats(tmp_path):
@@ -302,8 +324,6 @@ def test_parser_performance_benchmark(tmp_path):
     yaml_path = tmp_path / "large_mech.yaml"
 
     json_path.write_text(json.dumps(mech_dict))
-    import yaml
-
     yaml_path.write_text(yaml.dump(mech_dict))
 
     # Time CPU rather than wall clock. This benchmark runs under pytest-xdist on

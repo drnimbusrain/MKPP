@@ -18,6 +18,8 @@ from .model import (
     SpeciesDefinition,
 )
 
+_SAFE_YAML_LOADER = yaml.CSafeLoader if yaml.__with_libyaml__ else yaml.SafeLoader
+
 MOLECULE_CM3_TO_MOL_M3 = 1.0e6 / 6.02214076e23
 SUPPORTED_CONCENTRATION_UNITS = {"molecule cm-3", "mol m-3"}
 
@@ -452,7 +454,7 @@ def load_mechanism(path: str | Path, *, convert_kinetic_units_to_si: bool = Fals
             if fmt == "json":
                 data = json.load(f)
             else:
-                data = yaml.safe_load(f)
+                data = yaml.load(f, Loader=_SAFE_YAML_LOADER)
     except json.JSONDecodeError as e:
         raise CompilationError(
             stage="parsing",
@@ -504,7 +506,7 @@ def load_environment(path: str | Path) -> EnvironmentDefinition:
             if fmt == "json":
                 data = json.load(f)
             else:
-                data = yaml.safe_load(f)
+                data = yaml.load(f, Loader=_SAFE_YAML_LOADER)
     except json.JSONDecodeError as e:
         raise CompilationError(
             stage="parsing",
