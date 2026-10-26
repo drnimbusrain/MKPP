@@ -9,7 +9,7 @@ import yaml
 from .codegen import generate_headers
 from .lowering import partition_reactions
 from .model import CompilationError
-from .parser import load_environment, load_mechanism
+from .parser import MOLECULE_CM3_TO_MOL_M3, load_environment, load_mechanism
 from .validation import sanitize_path, validate_mechanism, validate_mpi_safety
 
 # Species that belong to the NH4/NO3/SO4 equilibrium system
@@ -171,6 +171,7 @@ def run_compiler(
     generate_host_api: bool = False,
     mechanism_id: str | None = None,
     emit_reference_backend: bool = False,
+    convert_kinetic_units_to_si: bool = False,
 ) -> None:
     """Orchestrate the compilation pipeline."""
 
@@ -209,7 +210,9 @@ def run_compiler(
 
         validate_mpi_safety(env_config)
 
-        mech = load_mechanism(mech_path)
+        mech = load_mechanism(mech_path, convert_kinetic_units_to_si=convert_kinetic_units_to_si)
+        if mech.kinetic_units_converted_to_si:
+            env.air_density *= MOLECULE_CM3_TO_MOL_M3
         # Artifact identity is intentionally independent from the OpenAtmos
         # document's descriptive ``name``.  Benchmark and host integrations
         # can therefore use a stable, valid C++ identifier without copying or
@@ -270,7 +273,10 @@ def run_compiler(
         from .cache_manager import CacheEntry, CacheManager
 
         cache_mgr = CacheManager()
-        cache_key = cache_mgr.compute_key(Path(mech_path))
+        cache_key = cache_mgr.compute_key(
+            Path(mech_path),
+            convert_kinetic_units_to_si=convert_kinetic_units_to_si,
+        )
 
         cached_entry = None
         if not no_cache:
@@ -422,6 +428,14 @@ def main(args=None):
         default=False,
         help="Generate C, C++, and Fortran host API headers and C wrapper source",
     )
+    compile_parser.add_argument(
+        "--convert-kinetic-units-to-si",
+        action="store_true",
+        help=(
+            "Convert supported rate-law pre-exponential factors from a mechanism's "
+            "molecule cm-3 concentration basis to mol m-3; the solver state must then use mol m-3"
+        ),
+    )
     compile_parser.add_argument("--emit-unrolled-reference", action="store_true")
 
     parsed_args = parser.parse_args(args)
@@ -446,6 +460,7 @@ def main(args=None):
             generate_host_api=parsed_args.host_api,
             mechanism_id=parsed_args.mechanism_id,
             emit_reference_backend=parsed_args.emit_unrolled_reference,
+            convert_kinetic_units_to_si=parsed_args.convert_kinetic_units_to_si,
         )
         sys.exit(0)
 

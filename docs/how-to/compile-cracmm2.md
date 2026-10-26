@@ -34,6 +34,11 @@ python3 -m mkpp.cli compile \
   --adjoint --emit-manifest --report --no-cache
 ```
 
-CRACMM expressions that have no exact OpenAtmos rate-law equivalent are exposed
-as named host forcings. Their source expressions remain in the mechanism
-metadata; they are not replaced with guessed constants.
+Recognized multi-channel reaction rates are mapped to MKPP's `EP2` and `EP3`
+forms; all 11 recognized pressure-dependent associations are mapped to the
+standard `TROE` reaction type. The six remaining `UNKNOWN` rates are
+expressions that cannot be represented safely and are listed in
+`metadata.unconverted_rates` with their original expression and reason. The
+current unresolved reactions are R051, R064, R067, R167, R169, and HAL_Ozone.
+They need a separately implemented custom-rate path; the importer does not
+substitute guessed constants.

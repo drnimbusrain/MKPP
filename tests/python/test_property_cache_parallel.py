@@ -231,6 +231,17 @@ def test_property_6_hash_sensitivity(data_a, data_b):
         assert key_a.yaml_hash != key_b.yaml_hash
 
 
+def test_cache_key_distinguishes_kinetic_unit_conversion_mode(tmp_path):
+    mechanism_path = tmp_path / "mechanism.json"
+    mechanism_path.write_text('{"concentration_unit": "molecule cm-3"}', encoding="utf-8")
+
+    manager = CacheManager()
+    source_units_key = manager.compute_key(mechanism_path)
+    si_units_key = manager.compute_key(mechanism_path, convert_kinetic_units_to_si=True)
+
+    assert source_units_key.yaml_hash != si_units_key.yaml_hash
+
+
 # ---------------------------------------------------------------------------
 # Property 7: Parallel Jacobian equivalence
 # **Validates: Requirements 3.5, 3.6**

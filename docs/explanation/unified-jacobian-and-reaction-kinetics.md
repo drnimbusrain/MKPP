@@ -10,14 +10,21 @@ MKPP's Ahead-Of-Time (AOT) Python preprocessor symbolically evaluates and differ
 
 $$R_k = k(T, P, M, \dots) \prod_{j \in \text{reactants}} [C_j]^{s_{j,k}}$$
 
-where $s_{j,k}$ is the stoichiometric coefficient of reactant $j$.
+where $s_{j,k}$ is the stoichiometric coefficient of reactant $j$. The
+mechanism's root-level `concentration_unit` declares the units of each
+concentration. MKPP preserves pre-exponential factors as written by default;
+the caller must use matching concentration units when supplying solver state.
 
 ### 1.1 ARRHENIUS
 Modified Arrhenius rate laws account for temperature-dependent rate constants (aligned with MICM sign conventions):
 
 $$k(T) = A \cdot \left(\frac{T}{300}\right)^B \cdot \exp\left(\frac{C}{T}\right)$$
 
-- **`A`**: Pre-exponential factor $[\text{cm}^3/\text{molec/s}$ or $1/\text{s}]$.
+- **`A`**: Pre-exponential factor with units $[C]^{-(n-1)}\,s^{-1}$, where
+  $n$ is total reactant molecularity and $[C]$ is the declared concentration
+  unit. Thus a bimolecular `A` is `cm3 molecule-1 s-1` for `molecule cm-3`
+  mechanisms, or `m3 mol-1 s-1` for `mol m-3` mechanisms; first-order `A` is
+  `s-1`.
 - **`B`**: Temperature dependence exponent $n$.
 - **`C`**: Activation energy parameter $-E_a / R$ $[K]$ (matching MICM).
 
@@ -33,7 +40,15 @@ $$P_r = \frac{k_0(T)}{k_\infty(T)}, \quad F = F_c^{\frac{1}{1 + \left(\log_{10} 
 $$k(T, M) = \left(\frac{k_0(T)}{1 + P_r}\right) \cdot F$$
 
 - **`Fc`**: Falloff broadening factor (default: $0.6$).
-- **`[M]`**: Total air density $[\text{molec/cm}^3]$.
+- **`[M]`**: Third-body concentration in the mechanism's declared
+  concentration unit.
+
+Mechanisms may declare `"concentration_unit": "molecule cm-3"` or
+`"concentration_unit": "mol m-3"`. The compiler option
+`--convert-kinetic-units-to-si` converts supported concentration-based
+pre-exponential factors and compile-time air number density to `mol m-3`
+units. It does not convert runtime state vectors, emissions, or externally
+supplied rates; those inputs must be SI when the option is used.
 
 ### 1.3 PHOTOLYSIS
 Photolytic rate laws driven by solar irradiance ($J$-values):

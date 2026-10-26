@@ -224,6 +224,26 @@ mkpp compile <mechanism.yaml> --test-env <env.yaml> [options]
 | `--dry-run` | flag | `false` | Run parsing and validation stages without emitting code |
 | `--verbose` | flag | `false` | Emit progress logs to `stderr` at each compilation pipeline stage |
 | `--migrate-equilibrium` | flag | `false` | Rewrite mechanism YAML replacing deprecated `PHASE_CHANGE` blocks with `EQUILIBRIUM` |
+| `--convert-kinetic-units-to-si` | flag | `false` | Convert supported rate-law pre-exponential factors from `molecule cm-3` to `mol m-3`; runtime concentrations must then be SI |
+
+### Kinetic concentration units
+
+MKPP preserves mechanism coefficients by default and does not infer or enforce
+units. Declare the concentration basis at the mechanism root with
+`"concentration_unit": "molecule cm-3"` or `"concentration_unit": "mol m-3"`.
+For a reaction with total reactant molecularity $n$, its Arrhenius pre-factor
+`A` has units $[C]^{-(n-1)}\,s^{-1}$; first-order and photolysis rates are in
+$s^{-1}$. The concentration values passed to a generated solver must use the
+mechanism's declared concentration unit.
+
+`--convert-kinetic-units-to-si` converts supported Arrhenius, Troe/falloff,
+EP2/EP3, and tunneling pre-exponential factors from `molecule cm-3` to
+`mol m-3`. It also converts compile-time air number density. With this flag,
+the caller must provide state concentrations, emissions, and any host-supplied
+concentration-dependent rates in SI units. Photolysis rates and external
+host-forcing values are not converted. The flag requires an explicit
+`concentration_unit`; unsupported numeric rate laws fail rather than being
+silently treated as converted.
 
 ---
 

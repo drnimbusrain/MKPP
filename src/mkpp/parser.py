@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,9 @@ from .model import (
     SolverMode,
     SpeciesDefinition,
 )
+
+MOLECULE_CM3_TO_MOL_M3 = 1.0e6 / 6.02214076e23
+SUPPORTED_CONCENTRATION_UNITS = {"molecule cm-3", "mol m-3"}
 
 
 def detect_config_format(source: str | Path) -> str:
@@ -74,7 +78,11 @@ def _normalize_species_dict(d: Any) -> dict[str, float]:
 
 
 def parse_mechanism_micm(
-    name: str, data: dict[str, Any], *, convert_openatmos_activation_energy: bool = False
+    name: str,
+    data: dict[str, Any],
+    *,
+    convert_openatmos_activation_energy: bool = False,
+    convert_kinetic_units_to_si: bool = False,
 ) -> MechanismDefinition:
     """Parse MICM/OpenAtmos standard dictionary into internal model."""
     if not isinstance(data, dict) or "species" not in data or not data["species"]:
@@ -82,6 +90,26 @@ def parse_mechanism_micm(
             stage="parsing",
             message="OpenAtmos v1 data must define at least one species",
         )
+
+    source_concentration_unit = data.get("concentration_unit")
+    concentration_unit = source_concentration_unit
+    if concentration_unit is not None and (
+        not isinstance(concentration_unit, str) or concentration_unit not in SUPPORTED_CONCENTRATION_UNITS
+    ):
+        raise CompilationError(
+            stage="validation",
+            message=(
+                f"Unsupported concentration_unit '{concentration_unit}'; "
+                f"expected one of {sorted(SUPPORTED_CONCENTRATION_UNITS)}"
+            ),
+        )
+    if convert_kinetic_units_to_si and concentration_unit is None:
+        raise CompilationError(
+            stage="validation",
+            message="--convert-kinetic-units-to-si requires mechanism concentration_unit",
+        )
+    if convert_kinetic_units_to_si and concentration_unit == "molecule cm-3":
+        concentration_unit = "mol m-3"
 
     species = []
     for s in data.get("species", []):
@@ -145,8 +173,103 @@ def parse_mechanism_micm(
                 converted[key] = nested
         return converted
 
+    def convert_rate_parameter(value: Any, reaction_name: str, parameter_name: str, order: float) -> float:
+        """Convert a concentration-based rate coefficient to mol m-3 units."""
+        try:
+            coefficient = float(value)
+        except (TypeError, ValueError) as exc:
+            raise CompilationError(
+                stage="validation",
+                message=(
+                    f"Cannot convert non-numeric {parameter_name} for reaction '{reaction_name}' "
+                    "to SI concentration units"
+                ),
+            ) from exc
+        converted = coefficient * MOLECULE_CM3_TO_MOL_M3 ** (1.0 - order)
+        if not math.isfinite(converted):
+            raise CompilationError(
+                stage="validation",
+                message=f"SI conversion of {parameter_name} for reaction '{reaction_name}' is not finite",
+            )
+        return converted
+
+    def is_numeric_parameter(value: Any) -> bool:
+        if isinstance(value, bool):
+            return False
+        try:
+            float(value)
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    def convert_reaction_parameters(
+        reaction_type: str,
+        reaction_name: str,
+        reactants: dict[str, float],
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Convert supported rate-law pre-exponential factors to SI units."""
+        order = sum(reactants.values())
+        converted = dict(parameters)
+
+        if reaction_type == "ARRHENIUS":
+            if "A" in converted:
+                converted["A"] = convert_rate_parameter(converted["A"], reaction_name, "A", order)
+        elif reaction_type in {"TROE", "FALLOFF"}:
+            for key, molecularity in (("k0", order + 1.0), ("kinf", order)):
+                nested = converted.get(key)
+                if isinstance(nested, dict) and "A" in nested:
+                    nested = dict(nested)
+                    nested["A"] = convert_rate_parameter(nested["A"], reaction_name, f"{key}.A", molecularity)
+                    converted[key] = nested
+                else:
+                    flat_key = f"{key}_A"
+                    if flat_key in converted:
+                        converted[flat_key] = convert_rate_parameter(
+                            converted[flat_key], reaction_name, flat_key, molecularity
+                        )
+        elif reaction_type == "TUNNELING":
+            if "A" in converted:
+                converted["A"] = convert_rate_parameter(converted["A"], reaction_name, "A", order)
+        elif reaction_type == "EP2":
+            for key, molecularity in (("A0", order), ("A2", order), ("A3", order + 1.0)):
+                if key in converted:
+                    converted[key] = convert_rate_parameter(converted[key], reaction_name, key, molecularity)
+        elif reaction_type == "EP3":
+            for key, molecularity in (("A1", order), ("A2", order + 1.0)):
+                if key in converted:
+                    converted[key] = convert_rate_parameter(converted[key], reaction_name, key, molecularity)
+        elif reaction_type in {"PHOTOLYSIS", "HETEROGENEOUS", "PHASE_CHANGE", "SURFACE"}:
+            pass
+        elif reaction_type == "UNKNOWN":
+            if is_numeric_parameter(converted.get("A")):
+                raise CompilationError(
+                    stage="validation",
+                    message=(
+                        f"Cannot convert numeric rate coefficient A for UNKNOWN reaction '{reaction_name}'; "
+                        "declare a supported rate type"
+                    ),
+                )
+        else:
+            rate_parameter_keys = ("A", "A0", "A1", "A2", "A3", "k0", "kinf", "k0_A", "kinf_A")
+            if any(
+                is_numeric_parameter(converted.get(key))
+                or (
+                    isinstance(converted.get(key), dict)
+                    and is_numeric_parameter(converted[key].get("A"))
+                )
+                for key in rate_parameter_keys
+            ):
+                raise CompilationError(
+                    stage="validation",
+                    message=f"SI kinetic-unit conversion is not implemented for reaction type '{reaction_type}'",
+                )
+
+        return converted
+
     for r in data.get("reactions", []):
         rtype = r.get("type", "UNKNOWN")
+        reaction_name = str(r.get("name", len(reactions)))
 
         if rtype == "EQUILIBRIUM":
             # Parse EQUILIBRIUM block into EquilibriumDefinition
@@ -224,6 +347,8 @@ def parse_mechanism_micm(
                 parameters[k] = v
         if convert_openatmos_activation_energy:
             parameters = micm_signed_parameters(parameters)
+        if convert_kinetic_units_to_si and data["concentration_unit"] == "molecule cm-3":
+            parameters = convert_reaction_parameters(rtype.upper(), reaction_name, reactants, parameters)
 
         # Maintain backwards compat for the simple tests
         base_rate = str(r.get("A", ""))
@@ -316,10 +441,16 @@ def parse_mechanism_micm(
         equilibrium_reactions=equilibrium_reactions,
         metadata=data.get("metadata", {}),
         has_cloud_gated_reaction=cloud_gated,
+        concentration_unit=concentration_unit,
+        kinetic_units_converted_to_si=(
+            convert_kinetic_units_to_si and source_concentration_unit == "molecule cm-3"
+        ),
     )
 
 
-def load_mechanism(path: str | Path) -> MechanismDefinition:
+def load_mechanism(
+    path: str | Path, *, convert_kinetic_units_to_si: bool = False
+) -> MechanismDefinition:
     """Load an OpenAtmos v1 chemical mechanism from a JSON or YAML file."""
     p = Path(path)
     if not p.exists():
@@ -364,7 +495,11 @@ def load_mechanism(path: str | Path) -> MechanismDefinition:
     # file stem.
     metadata = data.get("metadata", {})
     mechanism_id = metadata.get("mkpp_mechanism_id") if isinstance(metadata, dict) else None
-    return parse_mechanism_micm(str(mechanism_id or data.get("name", p.stem)), data)
+    return parse_mechanism_micm(
+        str(mechanism_id or data.get("name", p.stem)),
+        data,
+        convert_kinetic_units_to_si=convert_kinetic_units_to_si,
+    )
 
 
 def load_environment(path: str | Path) -> EnvironmentDefinition:

@@ -46,6 +46,32 @@ def test_cli_compile_success(tmp_path, capsys, monkeypatch):
     assert e.value.code == 0
 
 
+def test_cli_passes_si_kinetic_unit_conversion_flag(tmp_path, capsys, monkeypatch):
+    mech_file = tmp_path / "mech.yaml"
+    mech_file.write_text("""
+    species: [{name: O3}]
+    reactions: []
+    """)
+    test_env_file = tmp_path / "env.yaml"
+    test_env_file.write_text("mpi: {gather_to_root: false}")
+    observed = {}
+    monkeypatch.setattr("mkpp.cli.run_compiler", lambda *args, **kwargs: observed.update(kwargs))
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "compile",
+                str(mech_file),
+                "--test-env",
+                str(test_env_file),
+                "--convert-kinetic-units-to-si",
+            ]
+        )
+
+    assert exc_info.value.code == 0
+    assert observed["convert_kinetic_units_to_si"] is True
+
+
 def test_cli_compile_fatal_error(capsys, monkeypatch, tmp_path):
     # Simulate a deep failure in the pipeline
     import json

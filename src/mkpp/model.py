@@ -163,6 +163,8 @@ class MechanismDefinition:
     # input (see EquilibriumInput.CloudLiquidWater). When False, the generated
     # code is byte-identical to a mechanism without triggers.
     has_cloud_gated_reaction: bool = False
+    concentration_unit: str | None = None
+    kinetic_units_converted_to_si: bool = False
 
 
 @dataclass

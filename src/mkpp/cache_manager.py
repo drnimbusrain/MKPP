@@ -43,7 +43,7 @@ class CacheManager:
     def __init__(self, cache_dir: Path = Path(".mkpp_cache")):
         self.cache_dir = cache_dir
 
-    def compute_key(self, yaml_path: Path) -> CacheKey:
+    def compute_key(self, yaml_path: Path, *, convert_kinetic_units_to_si: bool = False) -> CacheKey:
         """SHA-256 of file contents + MKPP version + SymPy version + compiler source.
 
         The lowering pipeline source (``lowering.py``, ``partitioning.py``) is
@@ -57,12 +57,14 @@ class CacheManager:
         except importlib.metadata.PackageNotFoundError:
             version = "dev"
         lowering_source = Path(__file__).parent / "lowering.py"
+        parser_source = Path(__file__).parent / "parser.py"
         codegen_source = Path(__file__).parent / "codegen.py"
         source_hash = b""
-        for src in (lowering_source, codegen_source):
+        for src in (lowering_source, parser_source, codegen_source):
             if src.exists():
                 source_hash += src.read_bytes()
-        hash_input = file_bytes + version.encode() + sympy.__version__.encode() + source_hash
+        conversion_option = b"kinetic_units_to_si=1" if convert_kinetic_units_to_si else b"kinetic_units_to_si=0"
+        hash_input = file_bytes + version.encode() + sympy.__version__.encode() + source_hash + conversion_option
         yaml_hash = hashlib.sha256(hash_input).hexdigest()
         return CacheKey(yaml_hash=yaml_hash, mkpp_version=version)
 
