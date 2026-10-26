@@ -181,8 +181,7 @@ def parse_mechanism_micm(
             raise CompilationError(
                 stage="validation",
                 message=(
-                    f"Cannot convert non-numeric {parameter_name} for reaction '{reaction_name}' "
-                    "to SI concentration units"
+                    f"Cannot convert non-numeric {parameter_name} for reaction '{reaction_name}' " "to SI concentration units"
                 ),
             ) from exc
         converted = coefficient * MOLECULE_CM3_TO_MOL_M3 ** (1.0 - order)
@@ -225,9 +224,7 @@ def parse_mechanism_micm(
                 else:
                     flat_key = f"{key}_A"
                     if flat_key in converted:
-                        converted[flat_key] = convert_rate_parameter(
-                            converted[flat_key], reaction_name, flat_key, molecularity
-                        )
+                        converted[flat_key] = convert_rate_parameter(converted[flat_key], reaction_name, flat_key, molecularity)
         elif reaction_type == "TUNNELING":
             if "A" in converted:
                 converted["A"] = convert_rate_parameter(converted["A"], reaction_name, "A", order)
@@ -254,10 +251,7 @@ def parse_mechanism_micm(
             rate_parameter_keys = ("A", "A0", "A1", "A2", "A3", "k0", "kinf", "k0_A", "kinf_A")
             if any(
                 is_numeric_parameter(converted.get(key))
-                or (
-                    isinstance(converted.get(key), dict)
-                    and is_numeric_parameter(converted[key].get("A"))
-                )
+                or (isinstance(converted.get(key), dict) and is_numeric_parameter(converted[key].get("A")))
                 for key in rate_parameter_keys
             ):
                 raise CompilationError(
@@ -442,15 +436,11 @@ def parse_mechanism_micm(
         metadata=data.get("metadata", {}),
         has_cloud_gated_reaction=cloud_gated,
         concentration_unit=concentration_unit,
-        kinetic_units_converted_to_si=(
-            convert_kinetic_units_to_si and source_concentration_unit == "molecule cm-3"
-        ),
+        kinetic_units_converted_to_si=(convert_kinetic_units_to_si and source_concentration_unit == "molecule cm-3"),
     )
 
 
-def load_mechanism(
-    path: str | Path, *, convert_kinetic_units_to_si: bool = False
-) -> MechanismDefinition:
+def load_mechanism(path: str | Path, *, convert_kinetic_units_to_si: bool = False) -> MechanismDefinition:
     """Load an OpenAtmos v1 chemical mechanism from a JSON or YAML file."""
     p = Path(path)
     if not p.exists():

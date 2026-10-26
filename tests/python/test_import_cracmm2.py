@@ -78,9 +78,7 @@ def test_cracmm2_photolysis_rates_are_classified_and_named() -> None:
     assert len(photolysis) == 41
     assert all(reaction["name"].startswith("J_") for reaction in photolysis)
     assert all(reaction["A"] == reaction["name"] for reaction in photolysis)
-    assert {
-        reaction["name"] for reaction in photolysis
-    } >= {"J_R001", "J_R014a", "J_TRP55", "J_TRP56", "J_T20"}
+    assert {reaction["name"] for reaction in photolysis} >= {"J_R001", "J_R014a", "J_TRP55", "J_TRP56", "J_T20"}
     assert mechanism["concentration_unit"] == "molecule cm-3"
     assert mechanism["metadata"]["photolysis_rate_source"].endswith("CSQY_DATA_cracmm2")
 

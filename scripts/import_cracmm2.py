@@ -15,9 +15,7 @@ import re
 from pathlib import Path
 
 SOURCE_COMMIT = "8a71fdbfb2183a1e37a53eb237e265d12f09b245"
-PHOTOLYSIS_RATE_SOURCE = (
-    "https://github.com/USEPA/CMAQ/blob/main/CCTM/src/MECHS/cracmm2/CSQY_DATA_cracmm2"
-)
+PHOTOLYSIS_RATE_SOURCE = "https://github.com/USEPA/CMAQ/blob/main/CCTM/src/MECHS/cracmm2/CSQY_DATA_cracmm2"
 # Rates in the CRACMM2 CSQY_DATA table are photolysis rates, even when the
 # reaction metadata omits hv from its reactants.
 PHOTOLYSIS_RATE_NAMES = frozenset(
@@ -63,18 +61,32 @@ ARRHENIUS_A = re.compile(rf"^\s*({NUMBER_VALUE})")
 ARRHENIUS_EXPONENT = re.compile(rf"exp\(\s*({NUMBER_VALUE})/T\s*\)", re.I)
 ARRHENIUS_TEMPERATURE = re.compile(rf"\(T/300\)\^({NUMBER_VALUE})", re.I)
 RATE_FACTOR = re.compile(
-    rf"^\s*({NUMBER_VALUE})(?:\s*\*\s*)?(?:exp\(\s*({NUMBER_VALUE})/T\s*\))?"
-    rf"(?:\(T/300\)\^({NUMBER_VALUE}))?\s*$",
+    rf"^\s*({NUMBER_VALUE})(?:\s*\*\s*)?(?:exp\(\s*({NUMBER_VALUE})/T\s*\))?" rf"(?:\(T/300\)\^({NUMBER_VALUE}))?\s*$",
     re.I,
 )
 RATE_CHANNEL = re.compile(rf"k_?([0-9oi])\s*=\s*({NUMBER_VALUE}[^<\n]*)", re.I)
 FALLOFF_SHAPE = re.compile(rf"n\s*=\s*({NUMBER_VALUE})\s*;\s*F\s*=\s*({NUMBER_VALUE})", re.I)
 UNCONVERTED_RATE_REASONS = {
-    "R051": "Source marks this as a special rate expression; its three coefficients do not map unambiguously to a supported standard rate law.",
-    "R064": "Reverse rate is defined as a temperature-dependent multiplier of the R063 falloff rate, not a standalone supported rate law.",
-    "R067": "Reverse rate is defined as a temperature-dependent multiplier of the R066 falloff rate, not a standalone supported rate law.",
-    "R167": "Reverse rate is defined as a temperature-dependent multiplier of the R166 falloff rate, not a standalone supported rate law.",
-    "R169": "Reverse rate is defined as a temperature-dependent multiplier of the R168 falloff rate, not a standalone supported rate law.",
+    "R051": (
+        "Source marks this as a special rate expression; its three coefficients do not map unambiguously to a supported "
+        "standard rate law."
+    ),
+    "R064": (
+        "Reverse rate is defined as a temperature-dependent multiplier of the R063 falloff rate, not a standalone "
+        "supported rate law."
+    ),
+    "R067": (
+        "Reverse rate is defined as a temperature-dependent multiplier of the R066 falloff rate, not a standalone "
+        "supported rate law."
+    ),
+    "R167": (
+        "Reverse rate is defined as a temperature-dependent multiplier of the R166 falloff rate, not a standalone "
+        "supported rate law."
+    ),
+    "R169": (
+        "Reverse rate is defined as a temperature-dependent multiplier of the R168 falloff rate, not a standalone "
+        "supported rate law."
+    ),
     "HAL_Ozone": "Rate depends on seawater and a pressure-dependent minimum expression not represented by supported rate types.",
 }
 
@@ -157,11 +169,7 @@ def terms(value: str) -> list[dict[str, object]]:
         if match.group("sign") == "-":
             coefficient = -coefficient
         result[name] = result.get(name, 0.0) + coefficient
-    return [
-        {"coefficient": coefficient, "species name": name}
-        for name, coefficient in result.items()
-        if coefficient > 0.0
-    ]
+    return [{"coefficient": coefficient, "species name": name} for name, coefficient in result.items() if coefficient > 0.0]
 
 
 def rate_parameters(rate: str, reaction_id: str, family: str) -> tuple[str, dict[str, object]]:
