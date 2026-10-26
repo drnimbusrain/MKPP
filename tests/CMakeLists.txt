@@ -2,6 +2,7 @@ add_subdirectory(contract)
 add_subdirectory(integration/e2e_validation)
 add_subdirectory(integration/solver_benchmark)
 add_subdirectory(integration/supernodal_factorization)
+add_subdirectory(integration/device_callability)
 
 include("${CMAKE_SOURCE_DIR}/src/mkpp_host/cmake/MKPPCompiledMechanism.cmake")
 

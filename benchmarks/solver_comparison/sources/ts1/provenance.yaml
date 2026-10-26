@@ -2,17 +2,17 @@ schema_version: 1
 mechanism_id: ts1
 canonical_source:
   repository: https://github.com/NCAR/musica.git
-  revision: 3c98ecdefd875658f211f51f26afa1f71a6a085d
-  configuration_version: "1.0.0"
+  revision: musica-0.16.5
+  configuration_version: 1.0.0
   files:
-    - upstream_path: configs/v1/ts1/ts1.json
-      vendored_path: benchmarks/solver_comparison/sources/ts1/musica-config/ts1.json
-      sha256: f5c31297ba5e38c17e49607ed2b7bcbf194b412fe49f819c23c66548e6f532de
-      upstream_sha256: 4390f37f0b0dedf38c6644986c7b972152b52bd4c3fba83f399035945771a997
-      local_normalization: metadata.mkpp_mechanism_id=ts1; chemistry is unchanged
-    - upstream_path: configs/v1/ts1/initial_conditions.csv
-      vendored_path: benchmarks/solver_comparison/sources/ts1/musica-config/initial_conditions.csv
-      sha256: 58db29256362fcd7fd60d47fe3d463c566dfbe14c000757202393fa7a28a9253
+  - upstream_path: configs/v1/ts1/ts1.json
+    vendored_path: benchmarks/solver_comparison/sources/ts1/musica-config/ts1.json
+    sha256: 83b997e913194dd66046e7f76d54538dbed7e717f2ecb569e73d2c5f38b71732
+    upstream_sha256: 83b997e913194dd66046e7f76d54538dbed7e717f2ecb569e73d2c5f38b71732
+    local_normalization: none; exact distributed MUSICA v1 configuration
+  - upstream_path: configs/v1/ts1/initial_conditions.csv
+    vendored_path: benchmarks/solver_comparison/sources/ts1/musica-config/initial_conditions.csv
+    sha256: 58db29256362fcd7fd60d47fe3d463c566dfbe14c000757202393fa7a28a9253
   observed_content:
     species: 210
     reactions: 547
@@ -24,17 +24,33 @@ canonical_source:
       temperature_k: 287.45
       boltzmann_constant_j_k: 1.380649e-23
       avogadro_constant_mol_inverse: 6.02214076e23
-      formula: pressure_pa / ((boltzmann_constant_j_k * avogadro_constant_mol_inverse) * temperature_k)
+      formula: pressure_pa / ((boltzmann_constant_j_k * avogadro_constant_mol_inverse)
+        * temperature_k)
       binary64_value: 42.39340054163681
       micm_evidence: include/micm/system/conditions.hpp Conditions::CalculateIdealAirDensity
+  distribution:
+    package: musica
+    version: 0.16.5
+    wheel: musica-0.16.5-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+    wheel_sha256: d761e911db82771e41372799d30c631d63fedbdf3c0e96309a5206beb05ee322
 micm_importer:
   repository: https://github.com/NCAR/micm.git
   revision: 97ac9e5d8aadd345c242722ee8274d71dfe0f73e
   upstream_path: benchmarks/solver_comparison/sources/ts1/micm-importer/import_ts1.py
   vendored_path: benchmarks/solver_comparison/sources/ts1/micm-importer/import_ts1.py
-  sha256: 603a8d449275de206e30eac77394c80af2c0054e151a802ff658a53c3ae69241
+  sha256: 2df0605aeb44abfd9d02e73f45e2a63cfbc95e8bbe06fc6b3a81529a5e35fa1b
+  local_modification: Preserve exact phase diffusion coefficients; require representable
+    MICM precision instead of substituting a default.
 generation:
   source_directory: benchmarks/solver_comparison/sources/ts1/musica-config
   importer: benchmarks/solver_comparison/sources/ts1/micm-importer/import_ts1.py
   output_kind: generated_micm_cpp_header
   canonical_source_policy: generated output is binding evidence, not canonical chemistry
+restored_initial_conditions:
+  package: musica
+  package_version: 0.16.5
+  package_path: musica/configs/v1/ts1/initial_conditions.csv
+  verification: exact match to the pre-existing pinned SHA-256
+source_fidelity_review:
+  evidence: benchmarks/solver_comparison/sources/ts1/v1-source-comparison.json
+  upstream_equivalence_verified: true

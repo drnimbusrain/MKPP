@@ -49,14 +49,6 @@ GAS_PHASE = "gas"
 ARRHENIUS_PARAMETERS = ("A", "B", "C", "D", "E")
 TROE_PARAMETERS = ("k0_A", "k0_B", "k0_C", "kinf_A", "kinf_B", "kinf_C", "Fc", "N")
 
-# The largest finite float. micm::Real is float when MICM_USE_DOUBLE=OFF, so a
-# coefficient above this is a sentinel for "no diffusion limit", not a value.
-FLOAT_MAX = 3.4028234663852886e38
-
-# The diffusion coefficient [m2 s-1] the configuration gives every other surface
-# species. It is a generic default, not a per-species measurement.
-DEFAULT_DIFFUSION_M2_S = 1e-05
-
 
 def number(value: float) -> str:
     """Format a float as a C++ double literal that round-trips exactly."""
@@ -68,24 +60,14 @@ def number(value: float) -> str:
 
 
 def diffusion_lines(name: str, coefficient: float) -> list[str]:
-    """Render the phase-species construction for one diffusion coefficient.
-
-    A coefficient the configuration can express but a float cannot is a sentinel
-    for "no diffusion limit". Written out verbatim it overflows in a
-    single-precision build, so write DEFAULT_DIFFUSION_M2_S in its place. The
-    default applies only to a sentinel; a coefficient a float can hold wins.
-    """
-    if coefficient <= FLOAT_MAX:
-        return [f"      phase_species.emplace_back(species, {number(coefficient)});"]
-    print(
-        f"note: {name} has a sentinel diffusion coefficient of {coefficient!r}; "
-        f"writing the default {DEFAULT_DIFFUSION_M2_S!r} m2 s-1 instead",
-        file=sys.stderr,
-    )
+    """Preserve the MUSICA phase coefficient; reject unsupported native precision."""
+    if not math.isfinite(coefficient) or coefficient <= 0:
+        raise ValueError(f"{name}: diffusion coefficient must be finite and positive")
+    literal = number(coefficient)
     return [
-        "      // The configuration sets no diffusion limit for this species, so this is the",
-        "      // default the other surface species carry. It is not a measurement.",
-        f"      phase_species.emplace_back(species, {number(DEFAULT_DIFFUSION_M2_S)});",
+        f"      static_assert(std::numeric_limits<micm::Real>::max() >= {literal},",
+        f'                    "{name}: configured diffusion coefficient requires binary64 MICM");',
+        f"      phase_species.emplace_back(species, {literal});",
     ]
 
 
@@ -436,6 +418,7 @@ def main() -> int:
         "#include <micm/util/property_keys.hpp>",
         "",
         "#include <algorithm>",
+        "#include <limits>",
         "#include <string_view>",
         "#include <vector>",
         "",

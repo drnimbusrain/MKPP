@@ -45,6 +45,21 @@
 #endif
 #include <KokkosBatched_Vector.hpp>
 {% endif %}
+// CPU libraries can own the heavy helper definitions. Device builds keep the
+// complete device-callable implementation visible without relocatable device code.
+#if defined(MKPP_SEPARATE_HOST_KERNELS_{{ mechanism_name | upper }})
+#include "{{ mechanism_name }}{{ suffix }}/host_declarations.hpp"
+#else
+#include "{{ mechanism_name }}{{ suffix }}/accessor.hpp"
+#include "{{ mechanism_name }}{{ suffix }}/rates.hpp"
+#include "{{ mechanism_name }}{{ suffix }}/jacobian.hpp"
+#include "{{ mechanism_name }}{{ suffix }}/supernodal_factorize.hpp"
+#include "{{ mechanism_name }}{{ suffix }}/supernodal_solve.hpp"
+{% if emit_reference_backend is defined and emit_reference_backend %}
+#include "{{ mechanism_name }}{{ suffix }}/factorize.hpp"
+{% endif %}
+#include "{{ mechanism_name }}{{ suffix }}/solve.hpp"
+#endif
 // Generated solver for {{ mechanism_name }}
 {% if partition_metadata and partition_metadata.get is defined and partition_metadata.get("sza_sorted") %}
 // SZA Workload Sorted: true
@@ -64,7 +79,7 @@ namespace mkpp::generated::{{ mechanism_name }} {
 {% endfor %}
   };
 
-{% if has_equilibrium %}
+{% if has_runtime_environment %}
 
   // Equilibrium meteorological input indices
   enum class EquilibriumInput : int {
@@ -100,26 +115,28 @@ namespace mkpp::generated::{{ mechanism_name }} {
 
 {% endif %}
   // The expression-dense RHS and Jacobian are compiled in bounded units.
-  // This declaration-only boundary keeps host-model translation units small.
-  namespace detail {
-{% for chunk in compiled_rate_chunks %}
-  void compute_rates_chunk_{{ loop.index0 }}(const double* state, double* rates,
-                                              const double* jvals, double temp, double rh{% if has_cloud_gated %}, double clw{% endif %});
-{% endfor %}
-{% for chunk in compiled_jacobian_chunks %}
-  void compute_jacobian_chunk_{{ loop.index0 }}(const double* state, double* jacobian,
-                                                 const double* jvals, double temp, double rh{% if has_cloud_gated %}, double clw{% endif %});
-{% endfor %}
-{% for chunk in compiled_lu_chunks %}
-  void factorize_lu_chunk_{{ loop.index0 }}(const double* w, double* lu);
-{% endfor %}
-  void solve_lu(const double* lu, const double* rhs, double* solution);
-  void factorize_plan(const double* w, double* lu);
-  void solve_plan(const double* lu, const double* rhs, double* solution);
-  }  // namespace detail
+  // Every detail:: helper is an inline device-callable definition supplied by
+  // the implementation fragments included at the top of this header, so a
+  // device instantiation of SolverKernels resolves the full call chain without
+  // any host-only out-of-line symbol.
+{% if emit_reference_backend is defined and emit_reference_backend %}
+  // The reference (unrolled) factorization chunks are likewise inline; the
+  // integrator selects them under MKPP_USE_UNROLLED_REFERENCE.
+{% endif %}
 
   template<typename DeviceType>
   struct SolverKernels {
+      using memory_space = typename DeviceType::memory_space;
+      static constexpr bool SUPPORTS_RUNTIME_ENVIRONMENT = {{ "true" if has_runtime_environment else "false" }};
+      static constexpr int NUM_RUNTIME_PARAMETERS = {{ num_runtime_parameters }};
+      static constexpr bool HAS_CLOUD_GATED = {{ "true" if has_cloud_gated else "false" }};
+{% if adjoint_enabled %}
+#ifdef MKPP_ENABLE_ADJOINT
+      // Expose the checkpoint buffer through the kernel type so generic
+      // device-path callers can name it without the mechanism namespace.
+      using CheckpointBuffer = ::mkpp::generated::{{ mechanism_name }}::CheckpointBuffer;
+#endif
+{% endif %}
 {% include "kernel_functions/compute_rates.j2" %}
 
 {% include "kernel_functions/compute_jacobian.j2" %}

@@ -81,6 +81,7 @@ nav:
       - Benchmark MKPP vs MICM: tutorials/benchmark-mkpp-vs-micm.md
   - How-To Guides:
       - Host Model Integration: how-to/host_model_integration.md
+      - Device-Callable Solver Path: how-to/device-callable-solver-path.md
       - Run a Box Model in Python: how-to/run-box-model-in-python.md
       - Create Custom Reactions: how-to/create-custom-reactions.md
       - Compile Adjoint & TLM Solvers: how-to/compile-adjoint-and-tlm-solvers.md

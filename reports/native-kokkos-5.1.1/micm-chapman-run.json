@@ -1,0 +1,21 @@
+{
+  "case": "legacy Chapman C++ smoke",
+  "command": [
+    "build/native-smoke/solver_benchmark_micm"
+  ],
+  "returncode": 0,
+  "wall_seconds": 0.010796805999916614,
+  "publication_eligible": false,
+  "status": "success",
+  "solve_ms": 1.452569,
+  "cell_steps": 30,
+  "final_state": {
+    "time_seconds": 600,
+    "values": {
+      "O": 1209.591364349028,
+      "O2": 5.10000004834301e+18,
+      "O3": 808610250266.4171,
+      "M": 2.46e+19
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "returncode": 0,
+  "wall_seconds": 1.3066610899995794,
+  "timing": {
+    "boundary": "steady_state_solve",
+    "elapsed_ms": 636.875502,
+    "cell_steps": 2,
+    "clock": "std::chrono::steady_clock",
+    "synchronized": true,
+    "synchronization": "Kokkos::fence",
+    "lifecycle_ms": {}
+  },
+  "all_finite": true,
+  "reference_wrms": 0.03381422687580354,
+  "reference_max": 0.2781246079331448,
+  "max_relative_change_from_dense": 0.0,
+  "publication_eligible": false
+}

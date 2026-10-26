@@ -2,13 +2,13 @@
 # KPP is intentionally absent and prohibited until independently admitted.
 schema_version: 1
 mechanism_id: ts1
-version: 1.0.0
+version: 1.1.0
 canonical_source:
 - path: benchmarks/solver_comparison/sources/ts1/musica-config/ts1.json
-  revision: 3c98ecdefd875658f211f51f26afa1f71a6a085d
-  sha256: f5c31297ba5e38c17e49607ed2b7bcbf194b412fe49f819c23c66548e6f532de
+  revision: musica-0.16.5
+  sha256: 83b997e913194dd66046e7f76d54538dbed7e717f2ecb569e73d2c5f38b71732
 - path: benchmarks/solver_comparison/sources/ts1/musica-config/initial_conditions.csv
-  revision: 3c98ecdefd875658f211f51f26afa1f71a6a085d
+  revision: musica-0.16.5
   sha256: 58db29256362fcd7fd60d47fe3d463c566dfbe14c000757202393fa7a28a9253
 canonical_species:
 - id: ALKNIT
@@ -11650,7 +11650,7 @@ reactions:
   rate_parameters:
     name: het4
     scaling factor: 1.0
-chemistry_sha256: f5c31297ba5e38c17e49607ed2b7bcbf194b412fe49f819c23c66548e6f532de
+chemistry_sha256: 83b997e913194dd66046e7f76d54538dbed7e717f2ecb569e73d2c5f38b71732
 photolysis_inputs:
 - id: jterpnit
   unit: s-1

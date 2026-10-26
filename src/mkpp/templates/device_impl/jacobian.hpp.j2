@@ -1,0 +1,36 @@
+{# Shared algebra: inline and device-callable by default; emitted out of line
+   when MKPP_DEFINE_HOST_KERNELS is set by a separate CPU implementation unit.
+#}
+#pragma once
+#include <Kokkos_Core.hpp>
+#include "accessor.hpp"
+namespace mkpp::generated::{{ mechanism_name }}::detail {
+{% for expressions in compiled_jacobian_chunks %}
+#if defined(MKPP_DEFINE_HOST_KERNELS)
+void
+#else
+KOKKOS_INLINE_FUNCTION void
+#endif
+compute_jacobian_chunk_{{ loop.index0 }}(
+  StrideView<const double, 1> state, StrideView<double, 2> jacobian,
+    const double* jvals, double temp, double rh{% if has_cloud_gated %}, double clw{% endif %}, double air_density) {
+{% if has_runtime_environment %}
+  const double Temp = temp;
+  const double RH = rh;
+  const double AirDensity = air_density;
+  (void)RH;
+{% if has_cloud_gated %}
+  const double CLW = clw;
+  (void)CLW;  // Referenced only by the gated reaction's chunk.
+{% endif %}
+{% else %}
+  (void)temp;
+  (void)rh;
+  (void)air_density;
+{% endif %}
+{% for expression in expressions %}
+  jacobian.at_slot({{ expression.slot }}, {{ expression.row }}, {{ expression.column }}) = {{ expression.expr }};
+{% endfor %}
+}
+{% endfor %}
+}  // namespace mkpp::generated::{{ mechanism_name }}::detail

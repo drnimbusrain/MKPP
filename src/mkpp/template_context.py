@@ -9,6 +9,7 @@ import math
 import re
 from typing import Any
 
+from .compact_plan import compact_plan
 from .factorization_plan import make_factorization_plan
 from .format_eqn import format_eqn
 from .model import MechanismDefinition, SymbolicLUPlan
@@ -102,15 +103,21 @@ def build_template_context(
 
     # --- Determine equilibrium and photolysis flags ---
     has_equilibrium = bool(mech.equilibrium_reactions)
+    has_runtime_environment = has_equilibrium or bool(
+        re.search(
+            r"\b(?:Temp|TEMP|temp|M_density)\b",
+            str(tuple(sympy_meta.get(key, "") for key in ("f_implicit", "f_explicit", "f_vector"))),
+        )
+    )
     # A cloud-gated kinetic reaction (activation_trigger naming
     # meteo.cloud_liquid_water) requires the generated solver to accept cloud
     # liquid water as a third per-cell equilibrium input
     # (EquilibriumInput.CloudLiquidWater). It also implies the equilibrium
-    # parameter channel (temp/rh) is live, so has_equilibrium is forced True;
+    # parameter channel (temp/rh) is live, so runtime environment inputs are enabled;
     # otherwise the runtime parameters would not be threaded.
     has_cloud_gated = bool(getattr(mech, "has_cloud_gated_reaction", False))
     if has_cloud_gated:
-        has_equilibrium = True
+        has_runtime_environment = True
     has_photolysis = False
     num_photolysis = 0
     photolysis_reactions = []
@@ -139,7 +146,7 @@ def build_template_context(
                     mech.species,
                     state_var="S",
                     use_parentheses=False,
-                    keep_env_symbols=has_equilibrium,
+                    keep_env_symbols=has_runtime_environment,
                     temperature=environment_temperature,
                     air_density=environment_air_density,
                 )
@@ -153,7 +160,7 @@ def build_template_context(
                     mech.species,
                     state_var="S",
                     use_parentheses=False,
-                    keep_env_symbols=has_equilibrium,
+                    keep_env_symbols=has_runtime_environment,
                     temperature=environment_temperature,
                     air_density=environment_air_density,
                 )
@@ -181,7 +188,7 @@ def build_template_context(
                     mech.species,
                     state_var="S",
                     use_parentheses=False,
-                    keep_env_symbols=has_equilibrium,
+                    keep_env_symbols=has_runtime_environment,
                     temperature=environment_temperature,
                     air_density=environment_air_density,
                 )
@@ -194,7 +201,7 @@ def build_template_context(
                     mech.species,
                     state_var="S",
                     use_parentheses=False,
-                    keep_env_symbols=has_equilibrium,
+                    keep_env_symbols=has_runtime_environment,
                     temperature=environment_temperature,
                     air_density=environment_air_density,
                 )
@@ -376,9 +383,13 @@ def build_template_context(
         "permutation": permutation,
         "adjoint_enabled": adjoint,
         "has_equilibrium": has_equilibrium,
+        "has_runtime_environment": has_runtime_environment,
+        "environment_temperature": environment_temperature,
+        "environment_air_density": environment_air_density,
         "has_cloud_gated": has_cloud_gated,
         "has_photolysis": has_photolysis,
         "num_photolysis": num_photolysis,
+        "num_runtime_parameters": num_photolysis,
         "tolerance_arrays": tolerance_arrays,
         "initial_step_seed": initial_step_seed,
         "simd_backend": simd_backend,
@@ -412,7 +423,7 @@ def build_template_context(
                 mech.species,
                 state_var="state",
                 use_parentheses=True,
-                keep_env_symbols=has_equilibrium,
+                keep_env_symbols=has_runtime_environment,
                 temperature=environment_temperature,
                 air_density=environment_air_density,
             )
@@ -422,7 +433,7 @@ def build_template_context(
                 mech.species,
                 state_var="S",
                 use_parentheses=False,
-                keep_env_symbols=has_equilibrium,
+                keep_env_symbols=has_runtime_environment,
                 temperature=environment_temperature,
                 air_density=environment_air_density,
             )
@@ -435,7 +446,7 @@ def build_template_context(
                 mech.species,
                 state_var="state",
                 use_parentheses=True,
-                keep_env_symbols=has_equilibrium,
+                keep_env_symbols=has_runtime_environment,
                 temperature=environment_temperature,
                 air_density=environment_air_density,
             )
@@ -445,7 +456,7 @@ def build_template_context(
                 mech.species,
                 state_var="S",
                 use_parentheses=False,
-                keep_env_symbols=has_equilibrium,
+                keep_env_symbols=has_runtime_environment,
                 temperature=environment_temperature,
                 air_density=environment_air_density,
             )
@@ -473,7 +484,7 @@ def build_template_context(
                 mech.species,
                 state_var="state",
                 use_parentheses=True,
-                keep_env_symbols=has_equilibrium,
+                keep_env_symbols=has_runtime_environment,
                 temperature=environment_temperature,
                 air_density=environment_air_density,
             )
@@ -491,7 +502,7 @@ def build_template_context(
                         mech.species,
                         state_var="state",
                         use_parentheses=True,
-                        keep_env_symbols=has_equilibrium,
+                        keep_env_symbols=has_runtime_environment,
                         temperature=environment_temperature,
                         air_density=environment_air_density,
                     )
@@ -504,19 +515,25 @@ def build_template_context(
     def _chunk(items: list[Any], size: int) -> list[list[Any]]:
         return [items[index : index + size] for index in range(0, len(items), size)]
 
-    def _raw_pointer_expression(expression: str) -> str:
-        return re.sub(r"state\((\d+)\)", r"state[\1]", expression)
+    def _layout_aware_expression(expression: str) -> str:
+        return expression
 
+    context["num_runtime_parameters"] = max(
+        [int(slot) + 1 for expression in rate_exprs_state for slot in re.findall(r"jvals\[(\d+)\]", expression)] + [num_photolysis]
+    )
     context["compiled_rate_chunks"] = [
         [
-            {"index": index, "expr": _raw_pointer_expression(expression)}
+            {"index": index, "expr": _layout_aware_expression(expression)}
             for index, expression in enumerate(chunk, start=chunk_index * 32)
         ]
         for chunk_index, chunk in enumerate(_chunk(rate_exprs_state, 32))
     ]
     context["compiled_jacobian_chunks"] = [
-        [{"row": row, "column": column, "expr": _raw_pointer_expression(expression)} for row, column, expression in chunk]
-        for chunk in _chunk(jacobian_entries_state, 256)
+        [
+            {"row": row, "column": column, "slot": chunk_index * 256 + index, "expr": _layout_aware_expression(expression)}
+            for index, (row, column, expression) in enumerate(chunk)
+        ]
+        for chunk_index, chunk in enumerate(_chunk(jacobian_entries_state, 256))
     ]
 
     # Sparse LU is emitted as a separate compiled unit while retaining the
@@ -551,6 +568,7 @@ def build_template_context(
     # Unlike the reference expressions it contains no chemistry algebra.
     l_locations = {(entry["i"], entry["j"]) for entry in lu_expressions if entry["kind"] == "L"}
     u_locations = {(entry["i"], entry["j"]) for entry in lu_expressions if entry["kind"] == "U"}
+    context["compact"] = compact_plan(N, jacobian_entries_state, permutation, l_locations, u_locations)
     context["plan_l_pattern"] = [int((row, column) in l_locations) for row in range(N) for column in range(N)]
     context["plan_u_pattern"] = [int((row, column) in u_locations) for row in range(N) for column in range(N)]
     context["compiled_forward_steps"] = [
@@ -574,7 +592,7 @@ def build_template_context(
                             mech.species,
                             state_var="state",
                             use_parentheses=True,
-                            keep_env_symbols=has_equilibrium,
+                            keep_env_symbols=has_runtime_environment,
                             temperature=environment_temperature,
                             air_density=environment_air_density,
                         )

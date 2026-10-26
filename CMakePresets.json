@@ -28,6 +28,16 @@
         "CMAKE_CXX_FLAGS": "-Wall -Wextra -pedantic",
         "CMAKE_Fortran_FLAGS": "-Wall -Wextra -pedantic"
       }
+    },
+    {
+      "name": "device",
+      "inherits": "default",
+      "displayName": "Device Compile Gate Build",
+      "description": "Release build with the device-callability gate enabled; the gate activates only when the linked Kokkos exposes a CUDA/HIP/SYCL backend, otherwise it reports device-unverified",
+      "binaryDir": "${sourceDir}/build-device",
+      "cacheVariables": {
+        "MKPP_DEVICE_COMPILE_GATE": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -38,12 +48,22 @@
     {
       "name": "dev-debug",
       "configurePreset": "dev-debug"
+    },
+    {
+      "name": "device",
+      "configurePreset": "device"
     }
   ],
   "testPresets": [
     {
       "name": "default",
       "configurePreset": "default",
+      "output": {"outputOnFailure": true},
+      "execution": {"noTestsAction": "error", "stopOnFailure": true}
+    },
+    {
+      "name": "device",
+      "configurePreset": "device",
       "output": {"outputOnFailure": true},
       "execution": {"noTestsAction": "error", "stopOnFailure": true}
     }

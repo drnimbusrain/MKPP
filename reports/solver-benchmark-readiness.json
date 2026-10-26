@@ -1,0 +1,67 @@
+{
+  "campaign_id": "cpu-ringer-v1",
+  "publishable": false,
+  "input_issues": [],
+  "targets": [
+    {
+      "mechanism_id": "chapman",
+      "required_solvers": [
+        "micm",
+        "kpp",
+        "mkpp"
+      ],
+      "verified_canonical_assets": [
+        "mechanisms/openatmos/chapman/mechanism.json"
+      ],
+      "issues": [
+        "OpenAtmos configuration must explicitly declare version '1.0.0'; unversioned/v0 inputs are forbidden",
+        "chapman-calibration-v1: mechanism identity differs from manifest chemistry identity",
+        "chapman-measurement-v1: mechanism identity differs from manifest chemistry identity",
+        "mechanism admission is draft; native scientific evidence is required"
+      ]
+    },
+    {
+      "mechanism_id": "small-strato",
+      "required_solvers": [
+        "micm",
+        "mkpp"
+      ],
+      "verified_canonical_assets": [],
+      "issues": [
+        "FATAL ERROR: sha256 mismatch for asset '/workspace/scratch/c30a2a2efea9/MKPP-feature-gpu/mechanisms/openatmos/small_strato/mechanism.json': expected bc651fdf1261a3b5d0e7827f9f0245c71dea122c1582bebcbb2b85fdb13af5a8, observed ab522e72f166761200423c00fb8a66adc4058797a0993d5bbd2e8379ce0912df",
+        "small-strato-calibration-v1: mechanism identity differs from manifest chemistry identity",
+        "small-strato-measurement-v1: mechanism identity differs from manifest chemistry identity",
+        "mechanism admission is ineligible; native scientific evidence is required"
+      ]
+    },
+    {
+      "mechanism_id": "saprc99",
+      "required_solvers": [
+        "micm",
+        "mkpp"
+      ],
+      "verified_canonical_assets": [],
+      "issues": [
+        "FATAL ERROR: sha256 mismatch for asset '/workspace/scratch/c30a2a2efea9/MKPP-feature-gpu/mechanisms/openatmos/saprc99/mechanism.json': expected af56d9427e97a8ccaac0a623a0df6652b01e5b093d9a8c856f5fb3bfcef30772, observed 7ed2118b062cab152dc4794131d9abe8d41c30e14ed4844eaaf1834fae530894",
+        "saprc99-calibration-v1: mechanism identity differs from manifest chemistry identity",
+        "saprc99-measurement-v1: mechanism identity differs from manifest chemistry identity",
+        "mechanism admission is ineligible; native scientific evidence is required"
+      ]
+    },
+    {
+      "mechanism_id": "ts1",
+      "required_solvers": [
+        "micm",
+        "mkpp"
+      ],
+      "verified_canonical_assets": [
+        "benchmarks/solver_comparison/sources/ts1/musica-config/ts1.json",
+        "benchmarks/solver_comparison/sources/ts1/musica-config/initial_conditions.csv"
+      ],
+      "issues": [
+        "mechanism admission is draft; native scientific evidence is required"
+      ]
+    }
+  ],
+  "reason": "Offline audit only; no chemistry, reference, calibration, accuracy, or resource gates were executed."
+}

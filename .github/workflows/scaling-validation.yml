@@ -1,0 +1,39 @@
+name: Atmospheric cell scaling validation
+on:
+  pull_request:
+    branches: [feature/gpu, develop]
+  workflow_dispatch:
+
+jobs:
+  native-cell-correctness:
+    strategy:
+      matrix:
+        backend: [serial, openmp]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python build and test dependencies
+        # These tests exercise code generation and native cell scaling; they do
+        # not use the optional MUSICA comparison integration.
+        run: python -m pip install -e . pytest hypothesis numpy cmake ninja
+      - name: Build pinned Kokkos CPU backend
+        run: |
+          git clone --depth 1 --branch 5.1.1 https://github.com/kokkos/kokkos.git "$RUNNER_TEMP/kokkos"
+          cmake -S "$RUNNER_TEMP/kokkos" -B "$RUNNER_TEMP/kokkos-build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=23 \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/kokkos-install" \
+            -DKokkos_ENABLE_SERIAL=ON -DKokkos_ENABLE_TESTS=OFF \
+            -DKokkos_ENABLE_OPENMP=${{ matrix.backend == 'openmp' && 'ON' || 'OFF' }}
+          cmake --build "$RUNNER_TEMP/kokkos-build" --parallel 2
+          cmake --install "$RUNNER_TEMP/kokkos-build"
+      - name: Validate sparse solves and heterogeneous C API batches
+        env:
+          OMP_NUM_THREADS: '4'
+          OMP_PROC_BIND: 'false'
+          MKPP_TEST_KOKKOS_ROOT: ${{ runner.temp }}/kokkos-install
+        run: python -m pytest -o addopts='' -q tests/python/test_compact_plan.py tests/test_native_cell_scaling.py

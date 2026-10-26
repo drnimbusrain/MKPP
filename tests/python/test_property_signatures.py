@@ -16,6 +16,7 @@ import re
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from mkpp.compact_plan import compact_plan
 from mkpp.template_engine import TemplateEngine
 
 # ---------------------------------------------------------------------------
@@ -220,6 +221,8 @@ def template_context_strategy(draw):
         "permutation": None,
         "adjoint_enabled": adjoint_enabled,
         "has_equilibrium": has_equilibrium,
+        "has_runtime_environment": has_equilibrium,
+        "num_runtime_parameters": num_photolysis,
         "has_cloud_gated": False,
         "has_photolysis": has_photolysis,
         "num_photolysis": num_photolysis,
@@ -256,6 +259,13 @@ def template_context_strategy(draw):
         context["transpose_forward_sub_steps"] = transpose_forward_sub_steps
         context["transpose_backward_sub_steps"] = transpose_backward_sub_steps
 
+    context["compact"] = compact_plan(
+        n,
+        jacobian_entries_state,
+        None,
+        {(entry["i"], entry["j"]) for entry in lu_expressions if entry["kind"] == "L"},
+        {(entry["i"], entry["j"]) for entry in lu_expressions if entry["kind"] == "U"},
+    )
     return context
 
 

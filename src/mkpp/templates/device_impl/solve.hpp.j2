@@ -1,0 +1,22 @@
+{# Shared algebra: inline and device-callable by default; emitted out of line
+   when MKPP_DEFINE_HOST_KERNELS is set by a separate CPU implementation unit.
+#}
+#pragma once
+#include <Kokkos_Core.hpp>
+namespace mkpp::generated::{{ mechanism_name }}::detail {
+#if defined(MKPP_DEFINE_HOST_KERNELS)
+void
+#else
+KOKKOS_INLINE_FUNCTION void
+#endif
+solve_lu(const double* lu, const double* rhs, double* solution) {
+  constexpr int N = {{ num_species }};
+  double work[N];
+{% for step in compiled_forward_steps %}
+  work[{{ step.index }}] = {{ step.expr }};
+{% endfor %}
+{% for step in compiled_backward_steps %}
+  solution[{{ step.index }}] = {{ step.expr }};
+{% endfor %}
+}
+}  // namespace mkpp::generated::{{ mechanism_name }}::detail

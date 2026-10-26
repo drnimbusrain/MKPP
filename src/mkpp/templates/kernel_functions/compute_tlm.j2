@@ -17,16 +17,19 @@
 #}
 #ifdef MKPP_ENABLE_ADJOINT
       template <class StateView, class DeltaView, class RateView>
-{% if has_equilibrium %}
-      KOKKOS_INLINE_FUNCTION void compute_tlm(const StateView& state, const DeltaView& delta_C, RateView& dF_block, const double* jvals, const double temp, const double rh{% if has_cloud_gated %}, const double clw{% endif %}) const {
+{% if has_runtime_environment %}
+      KOKKOS_INLINE_FUNCTION void compute_tlm(const StateView& state, const DeltaView& delta_C, RateView& dF_block, Kokkos::View<const double*, memory_space> jvals_view, const double temp = {{ environment_temperature | default(300.0) }}, const double rh = 0.5{% if has_cloud_gated %}, const double clw = 0.0{% endif %}, const double air_density = {{ environment_air_density | default(2.4476e19) }}) const {
+          const double* jvals = jvals_view.data();
           const double Temp = temp;
           const double RH = rh;
+          const double AirDensity = air_density;
           (void)RH;  // Reserved for future deliquescence modeling
 {% if has_cloud_gated %}
           const double CLW = clw;
 {% endif %}
 {% else %}
-      KOKKOS_INLINE_FUNCTION void compute_tlm(const StateView& state, const DeltaView& delta_C, RateView& dF_block, const double* jvals) const {
+      KOKKOS_INLINE_FUNCTION void compute_tlm(const StateView& state, const DeltaView& delta_C, RateView& dF_block, Kokkos::View<const double*, memory_space> jvals_view) const {
+          const double* jvals = jvals_view.data();
 {% endif %}
 {% for i in range(num_species) %}
           dF_block({{ i }}) = 0.0;

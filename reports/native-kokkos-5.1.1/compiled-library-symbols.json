@@ -1,0 +1,9 @@
+{
+  "library": "build/native-kokkos-5.1.1/benchmarks/solver_comparison/runners/mkpp/libmkpp_ts1_compiled_kernels.a",
+  "bytes": 43108,
+  "matching_math_symbols": [
+    "supernodal_factorize.cpp.o:",
+    "0000000000000000 t _GLOBAL__sub_I_supernodal_factorize.cpp"
+  ],
+  "note": "Generated functions are inline in headers; static archive existence alone is not proof the integration executable has built."
+}

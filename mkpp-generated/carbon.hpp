@@ -1,5 +1,17 @@
 #pragma once
 #include <Kokkos_Core.hpp>
+// CPU libraries can own the heavy helper definitions. Device builds keep the
+// complete device-callable implementation visible without relocatable device code.
+#if defined(MKPP_SEPARATE_HOST_KERNELS_CARBON)
+#include "carbon/host_declarations.hpp"
+#else
+#include "carbon/accessor.hpp"
+#include "carbon/rates.hpp"
+#include "carbon/jacobian.hpp"
+#include "carbon/supernodal_factorize.hpp"
+#include "carbon/supernodal_solve.hpp"
+#include "carbon/solve.hpp"
+#endif
 // Generated solver for carbon
 // SZA Workload Sorted: true
 namespace mkpp::generated::carbon {
@@ -22,6 +34,14 @@ namespace mkpp::generated::carbon {
       DummyNMVOC = 10
   };
 
+
+  // Equilibrium meteorological input indices
+  enum class EquilibriumInput : int {
+      Temperature = 0,
+      RelativeHumidity = 1,
+      COUNT = 2
+  };
+
 #ifdef MKPP_ENABLE_ADJOINT
   // Checkpoint buffer for discrete adjoint/TLM integration
   // Recompute-J strategy: only state is stored, Jacobian recomputed from saved state
@@ -35,20 +55,22 @@ namespace mkpp::generated::carbon {
 #endif
 
   // The expression-dense RHS and Jacobian are compiled in bounded units.
-  // This declaration-only boundary keeps host-model translation units small.
-  namespace detail {
-  void compute_rates_chunk_0(const double* state, double* rates,
-                                              const double* jvals, double temp, double rh);
-  void compute_jacobian_chunk_0(const double* state, double* jacobian,
-                                                 const double* jvals, double temp, double rh);
-  void factorize_lu_chunk_0(const double* w, double* lu);
-  void solve_lu(const double* lu, const double* rhs, double* solution);
-  void factorize_plan(const double* w, double* lu);
-  void solve_plan(const double* lu, const double* rhs, double* solution);
-  }  // namespace detail
+  // Every detail:: helper is an inline device-callable definition supplied by
+  // the implementation fragments included at the top of this header, so a
+  // device instantiation of SolverKernels resolves the full call chain without
+  // any host-only out-of-line symbol.
 
   template<typename DeviceType>
   struct SolverKernels {
+      using memory_space = typename DeviceType::memory_space;
+      static constexpr bool SUPPORTS_RUNTIME_ENVIRONMENT = true;
+      static constexpr int NUM_RUNTIME_PARAMETERS = 0;
+      static constexpr bool HAS_CLOUD_GATED = false;
+#ifdef MKPP_ENABLE_ADJOINT
+      // Expose the checkpoint buffer through the kernel type so generic
+      // device-path callers can name it without the mechanism namespace.
+      using CheckpointBuffer = ::mkpp::generated::carbon::CheckpointBuffer;
+#endif
       /**
        * @brief Evaluates the rate-of-change vector F(i) = dC_i / dt.
        *
@@ -59,8 +81,11 @@ namespace mkpp::generated::carbon {
        * @param jvals Array of photolysis rate constants [NUM_PHOTOLYSIS].
        */
       template <class StateView, class RateView>
-      KOKKOS_INLINE_FUNCTION void compute_rates(const StateView& state, RateView& F_block, const double* jvals) const {
-          detail::compute_rates_chunk_0(state.data(), F_block.data(), jvals, 0.0, 0.0);
+      KOKKOS_INLINE_FUNCTION void compute_rates(const StateView& state, RateView& F_block, Kokkos::View<const double*, memory_space> jvals_view, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const {
+          const double* jvals = jvals_view.data();
+              const auto state_accessor = detail::make_stride_view(state);
+              const auto rates_accessor = detail::make_stride_view(F_block);
+              detail::compute_rates_chunk_0(state_accessor, rates_accessor, jvals, temp, rh, air_density);
       }
 
       /**
@@ -73,24 +98,32 @@ namespace mkpp::generated::carbon {
        * @param jvals Array of photolysis rate constants [NUM_PHOTOLYSIS].
        */
       template <class StateView, class JacView>
-      KOKKOS_INLINE_FUNCTION void compute_jacobian(const StateView& state, JacView& J_block, const double* jvals) const {
-          detail::compute_jacobian_chunk_0(state.data(), J_block.data(), jvals, 0.0, 0.0);
+      KOKKOS_INLINE_FUNCTION void compute_jacobian(const StateView& state, JacView& J_block, Kokkos::View<const double*, memory_space> jvals_view, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const {
+          const double* jvals = jvals_view.data();
+              const auto state_accessor = detail::make_stride_view(state);
+              const auto jacobian_accessor = detail::make_stride_view(J_block);
+              detail::compute_jacobian_chunk_0(state_accessor, jacobian_accessor, jvals, temp, rh, air_density);
       }
 
 #ifdef MKPP_ENABLE_ADJOINT
       template <class StateView, class JacView>
-      KOKKOS_INLINE_FUNCTION void compute_adjoint(const StateView& state, JacView& J_adj_block, const double* jvals) const {
+      KOKKOS_INLINE_FUNCTION void compute_adjoint(const StateView& state, JacView& J_adj_block, Kokkos::View<const double*, memory_space> jvals_view, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const {
+          const double* jvals = jvals_view.data();
+          const double Temp = temp;
+          const double RH = rh;
+          const double AirDensity = air_density;
+          (void)RH;  // Reserved for future deliquescence modeling
           // --- Sparse Analytical Adjoint Jacobian Entries J_adj_block(i, j) = J^T(i, j) ---
           // J^T(CH4, CH4): d(d[CH4]/dt) / d[CH4]
-          J_adj_block(0, 0) = -1.0665177283814332e-13;
+          J_adj_block(0, 0) = -2.45e-12*Kokkos::exp(-1775.0/Temp) - 9.6e-12*Kokkos::exp(-1360.0/Temp);
           // J^T(CH4, LCH4byOH): d(d[LCH4byOH]/dt) / d[CH4]
-          J_adj_block(0, 4) = 6.3627720033519555e-15;
+          J_adj_block(0, 4) = 2.45e-12*Kokkos::exp(-1775.0/Temp);
           // J^T(CH4, LCH4byCl): d(d[LCH4byCl]/dt) / d[CH4]
-          J_adj_block(0, 5) = 1.0028900083479136e-13;
+          J_adj_block(0, 5) = 9.6e-12*Kokkos::exp(-1360.0/Temp);
           // J^T(CH4, FixedOH): d(d[FixedOH]/dt) / d[CH4]
-          J_adj_block(0, 7) = -6.3627720033519555e-15;
+          J_adj_block(0, 7) = -2.45e-12*Kokkos::exp(-1775.0/Temp);
           // J^T(CH4, FixedCl): d(d[FixedCl]/dt) / d[CH4]
-          J_adj_block(0, 8) = -1.0028900083479136e-13;
+          J_adj_block(0, 8) = -9.6e-12*Kokkos::exp(-1360.0/Temp);
           // J^T(CO, CO): d(d[CO]/dt) / d[CO]
           J_adj_block(1, 1) = -7.3679649e-14;
           // J^T(CO, LCObyOH): d(d[LCObyOH]/dt) / d[CO]
@@ -98,21 +131,21 @@ namespace mkpp::generated::carbon {
           // J^T(CO, FixedOH): d(d[FixedOH]/dt) / d[CO]
           J_adj_block(1, 7) = -7.3679649e-14;
           // J^T(FixedOH, CH4): d(d[CH4]/dt) / d[FixedOH]
-          J_adj_block(7, 0) = -6.3627720033519555e-15*state(0);
+          J_adj_block(7, 0) = -2.45e-12*state(0)*Kokkos::exp(-1775.0/Temp);
           // J^T(FixedOH, CO): d(d[CO]/dt) / d[FixedOH]
           J_adj_block(7, 1) = -7.3679649e-14*state(1);
           // J^T(FixedOH, LCH4byOH): d(d[LCH4byOH]/dt) / d[FixedOH]
-          J_adj_block(7, 4) = 6.3627720033519555e-15*state(0);
+          J_adj_block(7, 4) = 2.45e-12*state(0)*Kokkos::exp(-1775.0/Temp);
           // J^T(FixedOH, LCObyOH): d(d[LCObyOH]/dt) / d[FixedOH]
           J_adj_block(7, 6) = 7.3679649e-14*state(1);
           // J^T(FixedOH, FixedOH): d(d[FixedOH]/dt) / d[FixedOH]
-          J_adj_block(7, 7) = -6.3627720033519555e-15*state(0) - 7.3679649e-14*state(1);
+          J_adj_block(7, 7) = -2.45e-12*state(0)*Kokkos::exp(-1775.0/Temp) - 7.3679649e-14*state(1);
           // J^T(FixedCl, CH4): d(d[CH4]/dt) / d[FixedCl]
-          J_adj_block(8, 0) = -1.0028900083479136e-13*state(0);
+          J_adj_block(8, 0) = -9.6e-12*state(0)*Kokkos::exp(-1360.0/Temp);
           // J^T(FixedCl, LCH4byCl): d(d[LCH4byCl]/dt) / d[FixedCl]
-          J_adj_block(8, 5) = 1.0028900083479136e-13*state(0);
+          J_adj_block(8, 5) = 9.6e-12*state(0)*Kokkos::exp(-1360.0/Temp);
           // J^T(FixedCl, FixedCl): d(d[FixedCl]/dt) / d[FixedCl]
-          J_adj_block(8, 8) = -1.0028900083479136e-13*state(0);
+          J_adj_block(8, 8) = -9.6e-12*state(0)*Kokkos::exp(-1360.0/Temp);
           // J^T(DummyCH4, CO): d(d[CO]/dt) / d[DummyCH4]
           J_adj_block(9, 1) = 4.2566446e-15;
           // J^T(DummyCH4, PCOfromCH4): d(d[PCOfromCH4]/dt) / d[DummyCH4]
@@ -130,11 +163,16 @@ namespace mkpp::generated::carbon {
 
 #ifdef MKPP_ENABLE_ADJOINT
       template <class StateView, class DeltaView, class RateView>
-      KOKKOS_INLINE_FUNCTION void compute_tlm(const StateView& state, const DeltaView& delta_C, RateView& dF_block, const double* jvals) const {
+      KOKKOS_INLINE_FUNCTION void compute_tlm(const StateView& state, const DeltaView& delta_C, RateView& dF_block, Kokkos::View<const double*, memory_space> jvals_view, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const {
+          const double* jvals = jvals_view.data();
+          const double Temp = temp;
+          const double RH = rh;
+          const double AirDensity = air_density;
+          (void)RH;  // Reserved for future deliquescence modeling
           dF_block(0) = 0.0;
-          dF_block(0) += (-1.0665177283814332e-13) * delta_C(0);
-          dF_block(0) += (-6.3627720033519555e-15*state(0)) * delta_C(7);
-          dF_block(0) += (-1.0028900083479136e-13*state(0)) * delta_C(8);
+          dF_block(0) += (-2.45e-12*Kokkos::exp(-1775.0/Temp) - 9.6e-12*Kokkos::exp(-1360.0/Temp)) * delta_C(0);
+          dF_block(0) += (-2.45e-12*state(0)*Kokkos::exp(-1775.0/Temp)) * delta_C(7);
+          dF_block(0) += (-9.6e-12*state(0)*Kokkos::exp(-1360.0/Temp)) * delta_C(8);
           dF_block(1) = 0.0;
           dF_block(1) += (-7.3679649e-14) * delta_C(1);
           dF_block(1) += (-7.3679649e-14*state(1)) * delta_C(7);
@@ -145,21 +183,21 @@ namespace mkpp::generated::carbon {
           dF_block(3) = 0.0;
           dF_block(3) += (38199.012) * delta_C(10);
           dF_block(4) = 0.0;
-          dF_block(4) += (6.3627720033519555e-15) * delta_C(0);
-          dF_block(4) += (6.3627720033519555e-15*state(0)) * delta_C(7);
+          dF_block(4) += (2.45e-12*Kokkos::exp(-1775.0/Temp)) * delta_C(0);
+          dF_block(4) += (2.45e-12*state(0)*Kokkos::exp(-1775.0/Temp)) * delta_C(7);
           dF_block(5) = 0.0;
-          dF_block(5) += (1.0028900083479136e-13) * delta_C(0);
-          dF_block(5) += (1.0028900083479136e-13*state(0)) * delta_C(8);
+          dF_block(5) += (9.6e-12*Kokkos::exp(-1360.0/Temp)) * delta_C(0);
+          dF_block(5) += (9.6e-12*state(0)*Kokkos::exp(-1360.0/Temp)) * delta_C(8);
           dF_block(6) = 0.0;
           dF_block(6) += (7.3679649e-14) * delta_C(1);
           dF_block(6) += (7.3679649e-14*state(1)) * delta_C(7);
           dF_block(7) = 0.0;
-          dF_block(7) += (-6.3627720033519555e-15) * delta_C(0);
+          dF_block(7) += (-2.45e-12*Kokkos::exp(-1775.0/Temp)) * delta_C(0);
           dF_block(7) += (-7.3679649e-14) * delta_C(1);
-          dF_block(7) += (-6.3627720033519555e-15*state(0) - 7.3679649e-14*state(1)) * delta_C(7);
+          dF_block(7) += (-2.45e-12*state(0)*Kokkos::exp(-1775.0/Temp) - 7.3679649e-14*state(1)) * delta_C(7);
           dF_block(8) = 0.0;
-          dF_block(8) += (-1.0028900083479136e-13) * delta_C(0);
-          dF_block(8) += (-1.0028900083479136e-13*state(0)) * delta_C(8);
+          dF_block(8) += (-9.6e-12*Kokkos::exp(-1360.0/Temp)) * delta_C(0);
+          dF_block(8) += (-9.6e-12*state(0)*Kokkos::exp(-1360.0/Temp)) * delta_C(8);
           dF_block(9) = 0.0;
           dF_block(9) += (-4.2566446e-15) * delta_C(9);
           dF_block(10) = 0.0;
@@ -206,8 +244,14 @@ namespace mkpp::generated::carbon {
        * @param jvals Array of photolysis rate constants [NUM_PHOTOLYSIS].
        */
       template <class StateView>
-      KOKKOS_INLINE_FUNCTION void integrate(double dt_total, StateView& state, const double* jvals) const {
+      KOKKOS_INLINE_FUNCTION void integrate(double dt_total, StateView& state, Kokkos::View<const double*, memory_space> jvals_view, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const {
+          const double* jvals = jvals_view.data();
+          const double Temp = temp;
+          const double RH = rh;
+          const double AirDensity = air_density;
+          (void)RH;  // Reserved for future deliquescence modeling
           const int NUM_SPECIES = 11;
+          const auto state_accessor = detail::make_stride_view(state);
           // ROS-3 coefficients (3-stage, order 3)
           const double g = 0.435866521508459;
           const double safety = 0.9;
@@ -241,8 +285,44 @@ namespace mkpp::generated::carbon {
           const double S_10 = state(Species::FixedCl);  // [FixedCl]
           // The expression-dense Jacobian is evaluated by bounded compiled
           // units.  The solver still uses the same symbolic sparse LU plan.
+#ifndef MKPP_USE_UNROLLED_REFERENCE
+          double J_values[22] = {};
+          auto jacobian_accessor = detail::StrideView<double, 2>::compact(J_values);
+          detail::compute_jacobian_chunk_0(state_accessor, jacobian_accessor, jvals, temp, rh, air_density);
+          double W_values[27];
+          W_values[0] = inv_g_dt;
+          W_values[1] = 0.0 - J_values[8];
+          W_values[2] = inv_g_dt;
+          W_values[3] = 0.0 - J_values[7];
+          W_values[4] = inv_g_dt - J_values[21];
+          W_values[5] = inv_g_dt - J_values[20];
+          W_values[6] = 0.0 - J_values[6];
+          W_values[7] = 0.0 - J_values[5];
+          W_values[8] = inv_g_dt - J_values[3];
+          W_values[9] = 0.0 - J_values[4];
+          W_values[10] = 0.0 - J_values[13];
+          W_values[11] = inv_g_dt;
+          W_values[12] = 0.0 - J_values[14];
+          W_values[13] = 0.0 - J_values[16];
+          W_values[14] = inv_g_dt - J_values[17];
+          W_values[15] = 0.0 - J_values[15];
+          W_values[16] = 0.0 - J_values[10];
+          W_values[17] = inv_g_dt;
+          W_values[18] = 0.0 - J_values[9];
+          W_values[19] = 0.0 - J_values[1];
+          W_values[20] = inv_g_dt - J_values[0];
+          W_values[21] = 0.0 - J_values[2];
+          W_values[22] = 0.0 - J_values[11];
+          W_values[23] = inv_g_dt;
+          W_values[24] = 0.0 - J_values[12];
+          W_values[25] = 0.0 - J_values[18];
+          W_values[26] = inv_g_dt - J_values[19];
+          double LU_values[27];
+          detail::factorize_plan(W_values, LU_values);
+#else
           double J_values[NUM_SPECIES * NUM_SPECIES] = {};
-          detail::compute_jacobian_chunk_0(state.data(), J_values, jvals, 0.0, 0.0);
+          auto jacobian_accessor = detail::make_stride_view<double, 2>(J_values, NUM_SPECIES, 1);
+          detail::compute_jacobian_chunk_0(state_accessor, jacobian_accessor, jvals, temp, rh, air_density);
           // Analytical Jacobian & Iteration Matrix W = inv_g_dt*I - J (sparse)
           double J_0_2 = J_values[3 * NUM_SPECIES + 10];
           double J_1_3 = J_values[2 * NUM_SPECIES + 9];
@@ -295,16 +375,14 @@ namespace mkpp::generated::carbon {
           W_values[10 * NUM_SPECIES + 8] = -J_10_8;
           W_values[10 * NUM_SPECIES + 10] = inv_g_dt - J_10_10;
           double LU_values[NUM_SPECIES * NUM_SPECIES] = {};
-#ifndef MKPP_USE_UNROLLED_REFERENCE
-          detail::factorize_plan(W_values, LU_values);
-#else
           detail::factorize_lu_chunk_0(W_values, LU_values);
 #endif
 
           // --- Stage 1 ---
           // Rate evaluation F1 at S
           double F_values_1[NUM_SPECIES];
-          detail::compute_rates_chunk_0(state.data(), F_values_1, jvals, 0.0, 0.0);
+          auto rate_accessor_1 = detail::make_stride_view<double, 1>(F_values_1, 1);
+          detail::compute_rates_chunk_0(state_accessor, rate_accessor_1, jvals, temp, rh, air_density);
           double F1_0 = F_values_1[3];
           double F1_1 = F_values_1[2];
           double F1_2 = F_values_1[10];
@@ -373,7 +451,9 @@ namespace mkpp::generated::carbon {
           stage_state_2[5] = Y2_9;
           stage_state_2[8] = Y2_10;
           double F_values_2[NUM_SPECIES];
-          detail::compute_rates_chunk_0(stage_state_2, F_values_2, jvals, 0.0, 0.0);
+          auto rate_accessor_2 = detail::make_stride_view<double, 1>(F_values_2, 1);
+          auto stage_state_accessor_2 = detail::make_stride_view<double, 1>(stage_state_2, 1);
+          detail::compute_rates_chunk_0(stage_state_accessor_2, rate_accessor_2, jvals, temp, rh, air_density);
           double F2_0 = F_values_2[3];
           double F2_1 = F_values_2[2];
           double F2_2 = F_values_2[10];
@@ -626,8 +706,13 @@ namespace mkpp::generated::carbon {
 #ifdef MKPP_ENABLE_REDUCTION
       template <class StateView>
       KOKKOS_INLINE_FUNCTION void integrate_with_reduction(
-          double dt_total, StateView& state, const double* jvals, double importance_threshold) const
+          double dt_total, StateView& state, Kokkos::View<const double*, memory_space> jvals_view, double importance_threshold, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const
       {
+          const double* jvals = jvals_view.data();
+          const double Temp = temp;
+          const double RH = rh;
+          const double AirDensity = air_density;
+          (void)RH;  // Reserved for future deliquescence modeling
           const int NUM_SPECIES = 11;
           // ROS-3 coefficients (3-stage, order 3)
           const double g = 0.435866521508459;
@@ -677,11 +762,11 @@ namespace mkpp::generated::carbon {
           double F1_3 = -4.2566446e-15;
           double F1_4 = 38199.012 - 7.3679649e-14*S_4;
           double F1_5 = 7.3679649e-14*S_4;
-          double F1_6 = -6.3627720033519555e-15*S_8 - 7.3679649e-14*S_4;
-          double F1_7 = 6.3627720033519555e-15*S_8;
-          double F1_8 = -1.0665177283814332e-13*S_8;
-          double F1_9 = 1.0028900083479136e-13*S_8;
-          double F1_10 = -1.0028900083479136e-13*S_8;
+          double F1_6 = -2.45e-12*S_8*Kokkos::exp(-1775.0/Temp) - 7.3679649e-14*S_4;
+          double F1_7 = 2.45e-12*S_8*Kokkos::exp(-1775.0/Temp);
+          double F1_8 = -2.45e-12*S_8*Kokkos::exp(-1775.0/Temp) - 9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
+          double F1_9 = 9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
+          double F1_10 = -9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
 
           // 2. Evaluate importance and update active set
           active[0] = (Kokkos::fabs(F1_0) / (atol[0] + rtol[0] * Kokkos::fabs(state(3))) >= importance_threshold);
@@ -708,17 +793,17 @@ namespace mkpp::generated::carbon {
           double J_5_4 = 7.3679649e-14;
           double J_5_6 = 7.3679649e-14*S_4;
           double J_6_4 = -7.3679649e-14;
-          double J_6_6 = -6.3627720033519555e-15*S_8 - 7.3679649e-14*S_4;
-          double J_6_8 = -6.3627720033519555e-15;
-          double J_7_6 = 6.3627720033519555e-15*S_8;
-          double J_7_8 = 6.3627720033519555e-15;
-          double J_8_6 = -6.3627720033519555e-15*S_8;
-          double J_8_8 = -1.0665177283814332e-13;
-          double J_8_10 = -1.0028900083479136e-13*S_8;
-          double J_9_8 = 1.0028900083479136e-13;
-          double J_9_10 = 1.0028900083479136e-13*S_8;
-          double J_10_8 = -1.0028900083479136e-13;
-          double J_10_10 = -1.0028900083479136e-13*S_8;
+          double J_6_6 = -2.45e-12*S_8*Kokkos::exp(-1775.0/Temp) - 7.3679649e-14*S_4;
+          double J_6_8 = -2.45e-12*Kokkos::exp(-1775.0/Temp);
+          double J_7_6 = 2.45e-12*S_8*Kokkos::exp(-1775.0/Temp);
+          double J_7_8 = 2.45e-12*Kokkos::exp(-1775.0/Temp);
+          double J_8_6 = -2.45e-12*S_8*Kokkos::exp(-1775.0/Temp);
+          double J_8_8 = -2.45e-12*Kokkos::exp(-1775.0/Temp) - 9.6e-12*Kokkos::exp(-1360.0/Temp);
+          double J_8_10 = -9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
+          double J_9_8 = 9.6e-12*Kokkos::exp(-1360.0/Temp);
+          double J_9_10 = 9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
+          double J_10_8 = -9.6e-12*Kokkos::exp(-1360.0/Temp);
+          double J_10_10 = -9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
           double W_0_0 = active[0] ? inv_g_dt : 1.0;
           double W_0_2 = (active[0] && active[2]) ? (-J_0_2) : 0.0;
           double W_1_1 = active[1] ? inv_g_dt : 1.0;
@@ -839,11 +924,11 @@ namespace mkpp::generated::carbon {
           double F2_3 = -4.2566446e-15;
           double F2_4 = 38199.012 - 7.3679649e-14*Y2_4;
           double F2_5 = 7.3679649e-14*Y2_4;
-          double F2_6 = -6.3627720033519555e-15*Y2_8 - 7.3679649e-14*Y2_4;
-          double F2_7 = 6.3627720033519555e-15*Y2_8;
-          double F2_8 = -1.0665177283814332e-13*Y2_8;
-          double F2_9 = 1.0028900083479136e-13*Y2_8;
-          double F2_10 = -1.0028900083479136e-13*Y2_8;
+          double F2_6 = -2.45e-12*Y2_8*Kokkos::exp(-1775.0/Temp) - 7.3679649e-14*Y2_4;
+          double F2_7 = 2.45e-12*Y2_8*Kokkos::exp(-1775.0/Temp);
+          double F2_8 = -2.45e-12*Y2_8*Kokkos::exp(-1775.0/Temp) - 9.6e-12*Y2_8*Kokkos::exp(-1360.0/Temp);
+          double F2_9 = 9.6e-12*Y2_8*Kokkos::exp(-1360.0/Temp);
+          double F2_10 = -9.6e-12*Y2_8*Kokkos::exp(-1360.0/Temp);
           // RHS for stage 2
           double rhs2_0 = F2_0 + (-1.0156171083877703 / dt) * K1_0;
           double rhs2_1 = F2_1 + (-1.0156171083877703 / dt) * K1_1;
@@ -1078,10 +1163,15 @@ namespace mkpp::generated::carbon {
       // Returns number of accepted steps, or -1 if MAX_STEPS exceeded.
       template <class StateView>
       KOKKOS_INLINE_FUNCTION int integrate_fwd_checkpoint(
-          double dt_total, StateView& state, const double* jvals,
-          CheckpointBuffer& chk) const
+          double dt_total, StateView& state, Kokkos::View<const double*, memory_space> jvals_view,
+          CheckpointBuffer& chk, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const
       {
+          const double* jvals = jvals_view.data();
           const int NUM_SPECIES = 11;
+          const double Temp = temp;
+          const double RH = rh;
+          const double AirDensity = air_density;
+          (void)RH;  // Reserved for future deliquescence modeling
           // ROS-3 coefficients (3-stage, order 3)
           const double g = 0.435866521508459;
           const double safety = 0.9;
@@ -1111,8 +1201,8 @@ namespace mkpp::generated::carbon {
           const double S_10 = state(Species::FixedCl);  // [FixedCl]
 
           // --- Reaction Rate Fluxes R_m ---
-          const double R_0 = 6.3627720033519555e-15*S_0;
-          const double R_1 = 1.0028900083479136e-13*S_0;
+          const double R_0 = 2.45e-12*S_0*Kokkos::exp(-1775.0/Temp);
+          const double R_1 = 9.6e-12*S_0*Kokkos::exp(-1360.0/Temp);
           const double R_2 = 4.2566446e-15;
           const double R_3 = 7.3679649e-14*S_1;
           const double R_4 = 38199.012;
@@ -1129,17 +1219,17 @@ namespace mkpp::generated::carbon {
           double J_5_4 = 7.3679649e-14;
           double J_5_6 = 7.3679649e-14*S_4;
           double J_6_4 = -7.3679649e-14;
-          double J_6_6 = -6.3627720033519555e-15*S_8 - 7.3679649e-14*S_4;
-          double J_6_8 = -6.3627720033519555e-15;
-          double J_7_6 = 6.3627720033519555e-15*S_8;
-          double J_7_8 = 6.3627720033519555e-15;
-          double J_8_6 = -6.3627720033519555e-15*S_8;
-          double J_8_8 = -1.0665177283814332e-13;
-          double J_8_10 = -1.0028900083479136e-13*S_8;
-          double J_9_8 = 1.0028900083479136e-13;
-          double J_9_10 = 1.0028900083479136e-13*S_8;
-          double J_10_8 = -1.0028900083479136e-13;
-          double J_10_10 = -1.0028900083479136e-13*S_8;
+          double J_6_6 = -2.45e-12*S_8*Kokkos::exp(-1775.0/Temp) - 7.3679649e-14*S_4;
+          double J_6_8 = -2.45e-12*Kokkos::exp(-1775.0/Temp);
+          double J_7_6 = 2.45e-12*S_8*Kokkos::exp(-1775.0/Temp);
+          double J_7_8 = 2.45e-12*Kokkos::exp(-1775.0/Temp);
+          double J_8_6 = -2.45e-12*S_8*Kokkos::exp(-1775.0/Temp);
+          double J_8_8 = -2.45e-12*Kokkos::exp(-1775.0/Temp) - 9.6e-12*Kokkos::exp(-1360.0/Temp);
+          double J_8_10 = -9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
+          double J_9_8 = 9.6e-12*Kokkos::exp(-1360.0/Temp);
+          double J_9_10 = 9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
+          double J_10_8 = -9.6e-12*Kokkos::exp(-1360.0/Temp);
+          double J_10_10 = -9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
           // Block 0: species [PCOfromNMVOC, PCOfromCH4, LCH4byOH, CH4]
           double W_0_0 = inv_g_dt;
           double W_0_2 = -J_0_2;
@@ -1222,11 +1312,11 @@ namespace mkpp::generated::carbon {
           double F1_3 = -4.2566446e-15;
           double F1_4 = 38199.012 - 7.3679649e-14*S_4;
           double F1_5 = 7.3679649e-14*S_4;
-          double F1_6 = -6.3627720033519555e-15*S_8 - 7.3679649e-14*S_4;
-          double F1_7 = 6.3627720033519555e-15*S_8;
-          double F1_8 = -1.0665177283814332e-13*S_8;
-          double F1_9 = 1.0028900083479136e-13*S_8;
-          double F1_10 = -1.0028900083479136e-13*S_8;
+          double F1_6 = -2.45e-12*S_8*Kokkos::exp(-1775.0/Temp) - 7.3679649e-14*S_4;
+          double F1_7 = 2.45e-12*S_8*Kokkos::exp(-1775.0/Temp);
+          double F1_8 = -2.45e-12*S_8*Kokkos::exp(-1775.0/Temp) - 9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
+          double F1_9 = 9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
+          double F1_10 = -9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
           // Block 0: K1 forward sub [PCOfromNMVOC, PCOfromCH4, LCH4byOH, CH4]
           double y1_0 = F1_0;
           double y1_1 = F1_1;
@@ -1288,11 +1378,11 @@ namespace mkpp::generated::carbon {
           double F2_3 = -4.2566446e-15;
           double F2_4 = 38199.012 - 7.3679649e-14*Y2_4;
           double F2_5 = 7.3679649e-14*Y2_4;
-          double F2_6 = -6.3627720033519555e-15*Y2_8 - 7.3679649e-14*Y2_4;
-          double F2_7 = 6.3627720033519555e-15*Y2_8;
-          double F2_8 = -1.0665177283814332e-13*Y2_8;
-          double F2_9 = 1.0028900083479136e-13*Y2_8;
-          double F2_10 = -1.0028900083479136e-13*Y2_8;
+          double F2_6 = -2.45e-12*Y2_8*Kokkos::exp(-1775.0/Temp) - 7.3679649e-14*Y2_4;
+          double F2_7 = 2.45e-12*Y2_8*Kokkos::exp(-1775.0/Temp);
+          double F2_8 = -2.45e-12*Y2_8*Kokkos::exp(-1775.0/Temp) - 9.6e-12*Y2_8*Kokkos::exp(-1360.0/Temp);
+          double F2_9 = 9.6e-12*Y2_8*Kokkos::exp(-1360.0/Temp);
+          double F2_10 = -9.6e-12*Y2_8*Kokkos::exp(-1360.0/Temp);
           // RHS for stage 2
           double rhs2_0 = F2_0 + (-1.0156171083877703 / dt) * K1_0;
           double rhs2_1 = F2_1 + (-1.0156171083877703 / dt) * K1_1;
@@ -1566,9 +1656,17 @@ namespace mkpp::generated::carbon {
       template <class StateView, class AdjView>
       KOKKOS_INLINE_FUNCTION void integrate_adj(
           double dt_total, const StateView& state_final,
-          AdjView& lambda, const double* jvals,
-          const CheckpointBuffer& chk) const
+          AdjView& lambda, Kokkos::View<const double*, memory_space> jvals_view,
+          const CheckpointBuffer& chk, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const
       {
+          const double* jvals = jvals_view.data();
+          // Environment conditions must match the forward checkpoint so the
+          // recomputed Jacobian reflects the same rate law the state was
+          // integrated under.
+          const double Temp = temp;
+          const double RH = rh;
+          const double AirDensity = air_density;
+          (void)RH;  // Reserved for future deliquescence modeling
           const double g = 0.435866521508459;
 
           // --- Discrete Adjoint: backward integration over checkpointed steps ---
@@ -1589,7 +1687,7 @@ namespace mkpp::generated::carbon {
               const double S_9 = chk.state[step][9];
               const double S_10 = chk.state[step][10];
 
-              // Recompute Jacobian at checkpointed state (recompute-J strategy, D1)
+              // Recompute Jacobian at checkpointed state (recompute-J strategy)
               double J_0_2 = 38199.012;
               double J_1_3 = 4.2566446e-15;
               double J_2_2 = -38199.012;
@@ -1601,17 +1699,17 @@ namespace mkpp::generated::carbon {
               double J_5_4 = 7.3679649e-14;
               double J_5_6 = 7.3679649e-14*S_4;
               double J_6_4 = -7.3679649e-14;
-              double J_6_6 = -6.3627720033519555e-15*S_8 - 7.3679649e-14*S_4;
-              double J_6_8 = -6.3627720033519555e-15;
-              double J_7_6 = 6.3627720033519555e-15*S_8;
-              double J_7_8 = 6.3627720033519555e-15;
-              double J_8_6 = -6.3627720033519555e-15*S_8;
-              double J_8_8 = -1.0665177283814332e-13;
-              double J_8_10 = -1.0028900083479136e-13*S_8;
-              double J_9_8 = 1.0028900083479136e-13;
-              double J_9_10 = 1.0028900083479136e-13*S_8;
-              double J_10_8 = -1.0028900083479136e-13;
-              double J_10_10 = -1.0028900083479136e-13*S_8;
+              double J_6_6 = -2.45e-12*S_8*Kokkos::exp(-1775.0/Temp) - 7.3679649e-14*S_4;
+              double J_6_8 = -2.45e-12*Kokkos::exp(-1775.0/Temp);
+              double J_7_6 = 2.45e-12*S_8*Kokkos::exp(-1775.0/Temp);
+              double J_7_8 = 2.45e-12*Kokkos::exp(-1775.0/Temp);
+              double J_8_6 = -2.45e-12*S_8*Kokkos::exp(-1775.0/Temp);
+              double J_8_8 = -2.45e-12*Kokkos::exp(-1775.0/Temp) - 9.6e-12*Kokkos::exp(-1360.0/Temp);
+              double J_8_10 = -9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
+              double J_9_8 = 9.6e-12*Kokkos::exp(-1360.0/Temp);
+              double J_9_10 = 9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
+              double J_10_8 = -9.6e-12*Kokkos::exp(-1360.0/Temp);
+              double J_10_10 = -9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
 
               // Form iteration matrix W = (1/(gamma*h))*I - J
               // Block 0: species [PCOfromNMVOC, PCOfromCH4, LCH4byOH, CH4]
@@ -1886,9 +1984,17 @@ namespace mkpp::generated::carbon {
       template <class StateView, class PertView>
       KOKKOS_INLINE_FUNCTION void integrate_tlm(
           double dt_total, const StateView& state_0,
-          PertView& delta_C, const double* jvals,
-          const CheckpointBuffer& chk) const
+          PertView& delta_C, Kokkos::View<const double*, memory_space> jvals_view,
+          const CheckpointBuffer& chk, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const
       {
+          const double* jvals = jvals_view.data();
+          // Environment conditions must match the forward checkpoint so the
+          // recomputed Jacobian reflects the same rate law the state was
+          // integrated under.
+          const double Temp = temp;
+          const double RH = rh;
+          const double AirDensity = air_density;
+          (void)RH;  // Reserved for future deliquescence modeling
           const double g = 0.435866521508459;
 
           // Local aliases for delta_C (TLM stages use dC_k naming)
@@ -1923,7 +2029,7 @@ namespace mkpp::generated::carbon {
               const double S_9 = chk.state[step][9];
               const double S_10 = chk.state[step][10];
 
-              // Recompute Jacobian at checkpointed state (recompute-J strategy, D1)
+              // Recompute Jacobian at checkpointed state (recompute-J strategy)
               double J_0_2 = 38199.012;
               double J_1_3 = 4.2566446e-15;
               double J_2_2 = -38199.012;
@@ -1935,17 +2041,17 @@ namespace mkpp::generated::carbon {
               double J_5_4 = 7.3679649e-14;
               double J_5_6 = 7.3679649e-14*S_4;
               double J_6_4 = -7.3679649e-14;
-              double J_6_6 = -6.3627720033519555e-15*S_8 - 7.3679649e-14*S_4;
-              double J_6_8 = -6.3627720033519555e-15;
-              double J_7_6 = 6.3627720033519555e-15*S_8;
-              double J_7_8 = 6.3627720033519555e-15;
-              double J_8_6 = -6.3627720033519555e-15*S_8;
-              double J_8_8 = -1.0665177283814332e-13;
-              double J_8_10 = -1.0028900083479136e-13*S_8;
-              double J_9_8 = 1.0028900083479136e-13;
-              double J_9_10 = 1.0028900083479136e-13*S_8;
-              double J_10_8 = -1.0028900083479136e-13;
-              double J_10_10 = -1.0028900083479136e-13*S_8;
+              double J_6_6 = -2.45e-12*S_8*Kokkos::exp(-1775.0/Temp) - 7.3679649e-14*S_4;
+              double J_6_8 = -2.45e-12*Kokkos::exp(-1775.0/Temp);
+              double J_7_6 = 2.45e-12*S_8*Kokkos::exp(-1775.0/Temp);
+              double J_7_8 = 2.45e-12*Kokkos::exp(-1775.0/Temp);
+              double J_8_6 = -2.45e-12*S_8*Kokkos::exp(-1775.0/Temp);
+              double J_8_8 = -2.45e-12*Kokkos::exp(-1775.0/Temp) - 9.6e-12*Kokkos::exp(-1360.0/Temp);
+              double J_8_10 = -9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
+              double J_9_8 = 9.6e-12*Kokkos::exp(-1360.0/Temp);
+              double J_9_10 = 9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
+              double J_10_8 = -9.6e-12*Kokkos::exp(-1360.0/Temp);
+              double J_10_10 = -9.6e-12*S_8*Kokkos::exp(-1360.0/Temp);
 
               // Form iteration matrix W = inv_g_h*I - J
               double W_0_0 = inv_g_h;

@@ -25,7 +25,7 @@ def write_report(mech, sympy_meta, out_dir, suffix=""):
 
         plt.figure(figsize=(12, 10))
         # Use spring layout for better separation
-        pos = nx.spring_layout(G, k=1.5, iterations=50)
+        pos = nx.spring_layout(G, k=1.5, iterations=50, seed=0)
 
         # Calculate degree centrality to size nodes
         degrees = dict(G.degree())

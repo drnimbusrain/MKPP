@@ -32,14 +32,20 @@ def symmetric_scaled_error(observed: float, reference: float, atol: float, rtol:
         raise ValueError("atol must be finite and strictly positive")
     if not math.isfinite(rtol) or rtol <= 0:
         raise ValueError("rtol must be finite and strictly positive")
-    denominator = atol + rtol * max(abs(observed), abs(reference))
-    return (observed - reference) / denominator
+    # Scale first so opposite, finite binary64 extremes cannot overflow the
+    # subtraction or turn an infinite denominator into a false zero error.
+    scale = max(atol, abs(observed), abs(reference))
+    denominator = atol / scale + rtol * (max(abs(observed), abs(reference)) / scale)
+    difference = observed / scale - reference / scale
+    return difference / denominator if denominator else math.copysign(math.inf, difference)
 
 
 def _validate_shape(subject: Trajectory, reference: Trajectory, atols: Mapping[str, float]) -> None:
     if set(subject) != set(reference):
         raise ValueError("subject and reference ensemble members/checkpoints must match")
     for member, reference_checkpoints in reference.items():
+        if not reference_checkpoints:
+            raise ValueError(f"member {member}: checkpoints must not be empty")
         subject_checkpoints = subject[member]
         if set(subject_checkpoints) != set(reference_checkpoints):
             raise ValueError(f"member {member}: subject and reference checkpoints must match")
@@ -98,7 +104,7 @@ def assess_trajectory_accuracy(
                 scaled.append(ScaledSpeciesError(member, checkpoint, species, value))
                 checkpoint_errors.append(value)
                 maximum = max(maximum, abs(value))
-            checkpoint_wrms.append(math.sqrt(math.fsum(value * value for value in checkpoint_errors) / len(checkpoint_errors)))
+            checkpoint_wrms.append(math.hypot(*checkpoint_errors) / math.sqrt(len(checkpoint_errors)))
 
     worst_wrms = max(checkpoint_wrms, default=math.inf)
     diagnostics: list[str] = []

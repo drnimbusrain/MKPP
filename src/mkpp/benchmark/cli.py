@@ -14,11 +14,16 @@ from typing import Any
 
 import yaml
 
+from mkpp.benchmark.audit import audit_campaign_assets
+from mkpp.benchmark.evidence import validate_requested_evidence
 from mkpp.benchmark.manifest import validate_manifest
+from mkpp.benchmark.openatmos import require_openatmos_v1
+from mkpp.benchmark.policy import validate_performance_policy
+from mkpp.benchmark.preflight import PreflightError, resolve_relative_asset, verify_asset_hash
 from mkpp.benchmark.report import render_markdown_report
-from mkpp.benchmark.sampling import balanced_order, common_repetition_count, stable_warmup_count
+from mkpp.benchmark.sampling import append_raw_record, balanced_order, paired_repetition_count
 from mkpp.benchmark.scenario import validate_scenario, validate_scenario_pair
-from mkpp.benchmark.schema import SchemaValidationError, validate_runner_result
+from mkpp.benchmark.schema import SchemaValidationError
 
 _ROOT = Path(__file__).resolve().parents[3]
 _MANIFESTS = _ROOT / "benchmarks/solver_comparison/manifests"
@@ -98,10 +103,13 @@ def validate_campaign(path: Path) -> Mapping[str, Any]:
     if not isinstance(resources, Mapping) or not isinstance(resources.get("primary"), Mapping):
         raise CliError("campaign.resources.primary is required")
     primary = resources["primary"]
-    if primary.get("physical_cores") != 1 or primary.get("threads") != 1:
+    if primary.get("backend", "cpu") != "cpu":
+        raise CliError("this campaign executor requires a CPU primary resource policy")
+    if any(type(primary.get(name)) is not int or primary[name] != 1 for name in ("physical_cores", "threads")):
         raise CliError("primary campaign resources require one physical core and one thread")
 
     resolved_targets: list[dict[str, str]] = []
+    solver_counts: list[int] = []
     for index, target in enumerate(targets):
         if not isinstance(target, Mapping):
             raise CliError(f"campaign.targets.{index} must be an object")
@@ -122,7 +130,9 @@ def validate_campaign(path: Path) -> Mapping[str, Any]:
             validate_scenario_pair(calibration, measurement)
         if calibration["mechanism"]["id"] != manifest["mechanism_id"]:
             raise CliError(f"campaign.targets.{index}: scenario mechanism does not match manifest")
+        solver_counts.append(len(manifest["required_solvers"]))
         resolved_targets.append({"mechanism_id": str(manifest["mechanism_id"]), "manifest": str(manifest_path)})
+    validate_performance_policy(campaign, solver_counts)
     return {"campaign_id": campaign["campaign_id"], "targets": resolved_targets}
 
 
@@ -159,6 +169,9 @@ def _invoke_campaign_runner(
     order_position: int,
     repetitions: int,
     warmups: int,
+    transcript: Path | None = None,
+    phase: str = "measurement",
+    timeout_seconds: float = 300.0,
 ) -> Mapping[str, Any]:
     """Invoke one native runner with a shared frozen campaign identity."""
 
@@ -213,19 +226,57 @@ def _invoke_campaign_runner(
             "--order-position",
             str(order_position),
         ]
-    completed = subprocess.run(command, capture_output=True, text=True, check=False, env=environment)
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, check=False, env=environment, timeout=timeout_seconds)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        if transcript is not None:
+            append_raw_record(
+                transcript,
+                {
+                    "phase": phase,
+                    "solver": solver,
+                    "run_id": common["RUN_ID"],
+                    "status": "execution_failed",
+                    "diagnostic": str(error),
+                },
+            )
+        raise CliError(f"{solver} runner could not complete: {error}", EXIT_RUNTIME) from error
+    if transcript is not None:
+        append_raw_record(
+            transcript,
+            {
+                "phase": phase,
+                "solver": solver,
+                "run_id": common["RUN_ID"],
+                "returncode": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+            },
+        )
     if completed.returncode != 0:
         raise CliError(f"{solver} runner failed: {completed.stderr.strip()}", EXIT_RUNTIME)
     try:
         result = json.loads(completed.stdout)
-        validate_runner_result(result)
+        validate_requested_evidence(
+            result,
+            solver=solver,
+            campaign_id=campaign_id,
+            run_id=common["RUN_ID"],
+            manifest=manifest,
+            scenario=scenario,
+            block=block,
+            order_position=order_position,
+        )
     except (json.JSONDecodeError, SchemaValidationError) as error:
         raise CliError(f"{solver} runner emitted invalid result: {error}", EXIT_RUNTIME) from error
     return result
 
 
 def execute_campaign(path: Path, output: Path, runner_values: Sequence[str]) -> tuple[Mapping[str, Any], ...]:
-    """Execute exactly the configured native subjects and atomically retain evidence."""
+    """Collect diagnostic native evidence, retaining failures before stopping.
+
+    This does not execute scientific admission or produce publishable ratios.
+    """
 
     campaign = _read_yaml(path)
     validation = validate_campaign(path)
@@ -245,6 +296,21 @@ def execute_campaign(path: Path, output: Path, runner_values: Sequence[str]) -> 
             detail.append(f"unexpected={','.join(sorted(unexpected))}")
         raise CliError(f"requested native runner set is not exact ({'; '.join(detail)})", EXIT_ENVIRONMENT)
 
+    # A MusicBox-like workload or an `openatmos` directory name is not proof
+    # of the chemistry format. Reject unversioned/v0 sources before execution.
+    for target in campaign["targets"]:
+        manifest = _read_yaml(_path_from_root(target["manifest"]))
+        for source in manifest["canonical_source"]:
+            try:
+                asset = resolve_relative_asset(_ROOT, source["path"])
+                verify_asset_hash(asset, source["sha256"])
+                if asset.suffix.lower() in {".json", ".yaml", ".yml"}:
+                    require_openatmos_v1(_read_yaml(asset))
+            except (PreflightError, SchemaValidationError) as error:
+                raise CliError(str(error), EXIT_SCIENTIFIC) from error
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    transcript = output.with_suffix(output.suffix + ".transcript.jsonl")
     records: list[Mapping[str, Any]] = []
     for target in campaign["targets"]:
         manifest = validate_manifest(_read_yaml(_path_from_root(target["manifest"])))
@@ -252,7 +318,7 @@ def execute_campaign(path: Path, output: Path, runner_values: Sequence[str]) -> 
         measurement = validate_scenario(_read_yaml(measurement_path))
         sampling = campaign.get("sampling", {"paired_blocks": 1, "ordering_seed": 0, "warmups": {"minimum": 1}})
         repetitions = 1
-        warmups = int(sampling["warmups"]["minimum"])
+        warmups = int(sampling["warmups"].get("maximum", sampling["warmups"]["minimum"]))
         if "sampling" in campaign:
 
             def pilot(solver: str, count: int) -> Sequence[float]:
@@ -269,50 +335,34 @@ def execute_campaign(path: Path, output: Path, runner_values: Sequence[str]) -> 
                             block=0,
                             order_position=0,
                             repetitions=count,
-                            warmups=1,
+                            warmups=warmups,
+                            transcript=transcript,
+                            phase="pilot",
                         )["timing"]["elapsed_ms"]
                     )
                     / 1000.0
                     for _ in range(int(sampling["pilot_iterations"]))
                 )
 
-            repetitions = max(
-                common_repetition_count(
-                    lambda count, solver=solver: pilot(solver, count), minimum_seconds=float(sampling["minimum_sample_seconds"])
-                )
-                for solver in manifest["required_solvers"]
+            repetitions = paired_repetition_count(
+                lambda count: {solver: pilot(solver, count) for solver in manifest["required_solvers"]},
+                minimum_seconds=float(sampling["minimum_sample_seconds"]),
             )
-            warmup_policy = sampling["warmups"]
-            stabilized: list[int] = []
-            for solver in manifest["required_solvers"]:
-                throughputs = []
-                for count in range(1, int(warmup_policy["maximum"]) + 1):
-                    _progress(0, 0, f"{manifest['mechanism_id']} warmup {solver} {count}/{warmup_policy['maximum']}")
-                    result = _invoke_campaign_runner(
-                        solver,
-                        runners[solver],
-                        mechanism=manifest["mechanism_id"],
-                        campaign_id=campaign["campaign_id"],
-                        manifest=manifest,
-                        scenario=measurement,
-                        block=0,
-                        order_position=0,
-                        repetitions=repetitions,
-                        warmups=count,
-                    )
-                    throughputs.append(result["timing"]["cell_steps"] / (result["timing"]["elapsed_ms"] / 1000.0))
-                stable = stable_warmup_count(
-                    throughputs,
-                    minimum=int(warmup_policy["minimum"]),
-                    maximum=int(warmup_policy["maximum"]),
-                    relative_range=float(warmup_policy["stable_last_three_relative_range"]),
-                )
-                if stable is None:
-                    raise CliError(f"{solver} warmup did not stabilize", EXIT_RUNTIME)
-                stabilized.append(stable)
-            warmups = max(stabilized)
-        # The declared policy is owned by this executor.  A calibrated native
-        # configuration is frozen before the interleaved measurement blocks.
+            # Each native process performs the declared maximum warmup count.
+            # Timings from different fresh processes cannot demonstrate within-
+            # process warmup stability, so do not label them as such.
+            append_raw_record(
+                transcript,
+                {
+                    "phase": "sampling_policy",
+                    "mechanism": manifest["mechanism_id"],
+                    "repetitions": repetitions,
+                    "warmups": warmups,
+                    "warmup_stability": "unverified; native per-warmup telemetry required",
+                },
+            )
+        # These diagnostic measurements have not passed scientific admission or
+        # calibration. A configuration label must never imply those gates ran.
         total_runs = int(sampling["paired_blocks"]) * len(manifest["required_solvers"])
         completed_runs = 0
         for block, order in enumerate(
@@ -330,6 +380,7 @@ def execute_campaign(path: Path, output: Path, runner_values: Sequence[str]) -> 
                     order_position=order_position,
                     repetitions=repetitions,
                     warmups=warmups,
+                    transcript=transcript,
                 )
                 if result["solver"]["id"] != solver:
                     raise CliError(f"{solver} runner identity mismatch", EXIT_ENVIRONMENT)
@@ -338,14 +389,10 @@ def execute_campaign(path: Path, output: Path, runner_values: Sequence[str]) -> 
                 if result["scenario"]["id"] != measurement["scenario_id"]:
                     raise CliError(f"{solver} runner scenario mismatch", EXIT_RUNTIME)
                 records.append(result)
+                append_raw_record(output, result)
                 completed_runs += 1
                 _progress(completed_runs, total_runs, f"{manifest['mechanism_id']} block {block} {solver}")
     del validation  # Validation must finish before native execution begins.
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_suffix(output.suffix + ".tmp")
-    prior = output.read_text(encoding="utf-8") if output.exists() else ""
-    temporary.write_text(prior + "".join(json.dumps(record, sort_keys=True) + "\n" for record in records), encoding="utf-8")
-    temporary.replace(output)
     return tuple(records)
 
 
@@ -369,6 +416,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list-mechanisms", action="store_true")
     parser.add_argument("--validate", action="store_true")
+    parser.add_argument("--audit", action="store_true", help="audit declared assets; never claims scientific admission")
     parser.add_argument("--campaign", type=Path)
     parser.add_argument("--mechanism")
     parser.add_argument("--scenario", type=Path)
@@ -383,13 +431,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args = _parser().parse_args(argv)
     try:
-        selected = sum((args.list_mechanisms, args.validate, args.campaign is not None, args.mechanism is not None))
+        selected = sum((args.list_mechanisms, args.validate, args.audit, args.campaign is not None, args.mechanism is not None))
         if selected == 0:
             raise CliError("select --list-mechanisms, --validate --campaign, --campaign, or --mechanism")
         if args.list_mechanisms and selected != 1:
             raise CliError("--list-mechanisms cannot be combined with another command")
         if args.validate and (args.campaign is None or selected != 2):
             raise CliError("--validate requires only --campaign <path>")
+        if args.audit and (args.campaign is None or selected != 2):
+            raise CliError("--audit requires only --campaign <path>")
         if args.list_mechanisms:
             print(json.dumps(list_mechanisms(), indent=2, sort_keys=True))
             return 0
@@ -398,6 +448,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise CliError("--validate requires --campaign <path>")
             print(json.dumps(validate_campaign(args.campaign), indent=2, sort_keys=True))
             return 0
+        if args.audit:
+            validate_campaign(args.campaign)
+            print(json.dumps(audit_campaign_assets(_read_yaml(args.campaign), _ROOT), indent=2, sort_keys=True))
+            return EXIT_SCIENTIFIC
         if args.mechanism is not None:
             if args.scenario is None:
                 raise CliError("--mechanism requires --scenario <path>")

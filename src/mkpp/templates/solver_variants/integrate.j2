@@ -50,19 +50,23 @@
        * @param jvals Array of photolysis rate constants [NUM_PHOTOLYSIS].
        */
       template <class StateView>
-{% if has_equilibrium %}
-      KOKKOS_INLINE_FUNCTION void integrate(double dt_total, StateView& state, const double* jvals, const double temp, const double rh{% if has_cloud_gated %}, const double clw{% endif %}) const {
+{% if has_runtime_environment %}
+      KOKKOS_INLINE_FUNCTION void integrate(double dt_total, StateView& state, Kokkos::View<const double*, memory_space> jvals_view, const double temp = {{ environment_temperature | default(300.0) }}, const double rh = 0.5{% if has_cloud_gated %}, const double clw = 0.0{% endif %}, const double air_density = {{ environment_air_density | default(2.4476e19) }}) const {
+          const double* jvals = jvals_view.data();
           const double Temp = temp;
           const double RH = rh;
+          const double AirDensity = air_density;
           (void)RH;  // Reserved for future deliquescence modeling
 {% if has_cloud_gated %}
           const double CLW = clw;
           (void)CLW;  // Referenced by the gated reaction's compiled chunks.
 {% endif %}
 {% else %}
-      KOKKOS_INLINE_FUNCTION void integrate(double dt_total, StateView& state, const double* jvals) const {
+      KOKKOS_INLINE_FUNCTION void integrate(double dt_total, StateView& state, Kokkos::View<const double*, memory_space> jvals_view) const {
+          const double* jvals = jvals_view.data();
 {% endif %}
           const int NUM_SPECIES = {{ num_species }};
+          const auto state_accessor = detail::make_stride_view(state);
           // {{ tableau.name }} coefficients ({{ tableau.stages }}-stage, order {{ tableau.ELO | int }})
           const double g = {{ "%.17g" | format(tableau.Gamma[0]) }};
           const double safety = 0.9;
@@ -90,9 +94,24 @@
 {% endfor %}
           // The expression-dense Jacobian is evaluated by bounded compiled
           // units.  The solver still uses the same symbolic sparse LU plan.
-          double J_values[NUM_SPECIES * NUM_SPECIES] = {};
+#ifndef MKPP_USE_UNROLLED_REFERENCE
+          double J_values[{{ [1, compact.j_slots | length] | max }}] = {};
+          auto jacobian_accessor = detail::StrideView<double, 2>::compact(J_values);
 {% for chunk in compiled_jacobian_chunks %}
-          detail::compute_jacobian_chunk_{{ loop.index0 }}(state.data(), J_values, jvals, {% if has_equilibrium %}temp, rh{% if has_cloud_gated %}, clw{% endif %}{% else %}0.0, 0.0{% endif %});
+          detail::compute_jacobian_chunk_{{ loop.index0 }}(state_accessor, jacobian_accessor, jvals, {% if has_runtime_environment %}temp, rh{% if has_cloud_gated %}, clw{% endif %}{% else %}0.0, 0.0{% endif %}, {% if has_runtime_environment %}air_density{% else %}{{ environment_air_density | default(2.4476e19) }}{% endif %});
+{% endfor %}
+          double W_values[{{ compact.w_slots | length }}];
+{% for location in compact.w_locations %}
+{% set i = location[0] %}{% set j = location[1] %}
+          W_values[{{ loop.index0 }}] = {% if i == j %}inv_g_dt{% else %}0.0{% endif %}{% if location in compact.j_slots %} - J_values[{{ compact.j_slots[location] }}]{% endif %};
+{% endfor %}
+          double LU_values[{{ compact.lu_slots | length }}];
+          detail::factorize_plan(W_values, LU_values);
+#else
+          double J_values[NUM_SPECIES * NUM_SPECIES] = {};
+          auto jacobian_accessor = detail::make_stride_view<double, 2>(J_values, NUM_SPECIES, 1);
+{% for chunk in compiled_jacobian_chunks %}
+          detail::compute_jacobian_chunk_{{ loop.index0 }}(state_accessor, jacobian_accessor, jvals, {% if has_runtime_environment %}temp, rh{% if has_cloud_gated %}, clw{% endif %}{% else %}0.0, 0.0{% endif %}, {% if has_runtime_environment %}air_density{% else %}{{ environment_air_density | default(2.4476e19) }}{% endif %});
 {% endfor %}
           // Analytical Jacobian & Iteration Matrix W = inv_g_dt*I - J (sparse)
 {% for entry in jacobian_entries %}
@@ -117,9 +136,6 @@
 {% endif %}
 {% endfor %}
           double LU_values[NUM_SPECIES * NUM_SPECIES] = {};
-#ifndef MKPP_USE_UNROLLED_REFERENCE
-          detail::factorize_plan(W_values, LU_values);
-#else
 {% for chunk in compiled_lu_chunks %}
           detail::factorize_lu_chunk_{{ loop.index0 }}(W_values, LU_values);
 {% endfor %}
@@ -162,8 +178,9 @@
 {% for i in range(num_species) %}
 {% if loop.first %}
           double F_values_{{ stage }}[NUM_SPECIES];
+          auto rate_accessor_{{ stage }} = detail::make_stride_view<double, 1>(F_values_{{ stage }}, 1);
 {% for chunk in compiled_rate_chunks %}
-          detail::compute_rates_chunk_{{ loop.index0 }}(state.data(), F_values_{{ stage }}, jvals, {% if has_equilibrium %}temp, rh{% if has_cloud_gated %}, clw{% endif %}{% else %}0.0, 0.0{% endif %});
+          detail::compute_rates_chunk_{{ loop.index0 }}(state_accessor, rate_accessor_{{ stage }}, jvals, {% if has_runtime_environment %}temp, rh{% if has_cloud_gated %}, clw{% endif %}{% else %}0.0, 0.0{% endif %}, {% if has_runtime_environment %}air_density{% else %}{{ environment_air_density | default(2.4476e19) }}{% endif %});
 {% endfor %}
 {% endif %}
 {% if permutation %}
@@ -186,8 +203,10 @@
 {% endif %}
 {% if loop.last %}
           double F_values_{{ stage }}[NUM_SPECIES];
+          auto rate_accessor_{{ stage }} = detail::make_stride_view<double, 1>(F_values_{{ stage }}, 1);
+          auto stage_state_accessor_{{ stage }} = detail::make_stride_view<double, 1>(stage_state_{{ stage }}, 1);
 {% for chunk in compiled_rate_chunks %}
-          detail::compute_rates_chunk_{{ loop.index0 }}(stage_state_{{ stage }}, F_values_{{ stage }}, jvals, {% if has_equilibrium %}temp, rh{% if has_cloud_gated %}, clw{% endif %}{% else %}0.0, 0.0{% endif %});
+          detail::compute_rates_chunk_{{ loop.index0 }}(stage_state_accessor_{{ stage }}, rate_accessor_{{ stage }}, jvals, {% if has_runtime_environment %}temp, rh{% if has_cloud_gated %}, clw{% endif %}{% else %}0.0, 0.0{% endif %}, {% if has_runtime_environment %}air_density{% else %}{{ environment_air_density | default(2.4476e19) }}{% endif %});
 {% endfor %}
 {% endif %}
 {% endfor %}

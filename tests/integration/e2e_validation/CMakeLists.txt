@@ -90,6 +90,22 @@ target_include_directories(test_e2e_batched PRIVATE ${CMAKE_SOURCE_DIR}/mkpp-gen
 target_link_libraries(test_e2e_batched PRIVATE mkpp_host Kokkos::kokkos GTest::gtest
                                                e2e_chapman_compiled_kernels)
 add_test(NAME test_e2e_batched COMMAND test_e2e_batched)
+
+# Standalone layout-aware accessor compile/read check (feature 024, T007).
+add_executable(test_accessor_compile test_accessor_compile.cpp)
+target_include_directories(test_accessor_compile PRIVATE ${CMAKE_SOURCE_DIR}/mkpp-generated)
+target_link_libraries(test_accessor_compile PRIVATE mkpp_host Kokkos::kokkos GTest::gtest_main)
+add_test(NAME test_accessor_compile COMMAND test_accessor_compile)
+
+# Determinism/bit-reproducibility across thread counts (feature 024, T033). The Ex-Aero SZA sorter
+# is header-only, so this target consumes its headers directly instead of linking the exaero
+# library.
+add_executable(test_determinism test_determinism.cpp)
+target_include_directories(test_determinism PRIVATE ${CMAKE_SOURCE_DIR}/mkpp-generated
+                                                    ${CMAKE_SOURCE_DIR}/src/exaero/include)
+target_link_libraries(test_determinism PRIVATE mkpp_host Kokkos::kokkos GTest::gtest
+                                               e2e_chapman_compiled_kernels)
+add_test(NAME determinism COMMAND test_determinism)
 if(MKPP_ENABLE_MICM_COMPARE)
   add_executable(benchmark_mkpp_vs_micm benchmark_mkpp_vs_micm.cpp)
   target_include_directories(

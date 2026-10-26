@@ -23,8 +23,13 @@ KOKKOS_INLINE_FUNCTION void set_cell_error(const ErrorView& err, size_t cell_idx
 /**
  * @brief Executes batched LU factorization and triangular solve for B independent N x N dense matrices.
  *
- * Uses KokkosBatched::SerialLU / SerialTrsv when KokkosKernels is enabled, or explicit
- * unblocked LU factorization and forward/backward substitution.
+ * When KokkosKernels is enabled, each team cooperatively factors and solves one matrix at a
+ * time using the full parallel hierarchy: `KokkosBatched::TeamLU` distributes the elimination
+ * across the team threads, and `KokkosBatched::TeamVectorTrsv` distributes each triangular
+ * substitution across both the team and vector layers. This replaces the previous
+ * one-thread-per-matrix `SerialLU`/`SerialTrsv` variants, which left the vector lanes idle
+ * (FR-008). Without KokkosKernels the routine falls back to an explicit unblocked LU plus
+ * forward/backward substitution on a single thread per cell.
  *
  * @tparam TeamMember Kokkos TeamPolicy member type or execution handle
  * @tparam MatrixView 3D Kokkos View with shape [B, N, N] and LayoutLeft
@@ -51,49 +56,63 @@ KOKKOS_INLINE_FUNCTION void batched_dense_solve(
     const int begin_cell = team_rank * cells_per_team;
     const int end_cell = (begin_cell + cells_per_team < num_cells) ? (begin_cell + cells_per_team) : num_cells;
 
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(member, begin_cell, end_cell), [=](const int cell_idx) {
+#ifdef MKPP_HAS_KOKKOS_KERNELS
+    // Team-cooperative path: every team thread participates in each factorization/solve, so the
+    // cell loop is a plain sequential loop (NOT a TeamThreadRange) and the batched kernels are
+    // invoked at team scope. A zero pivot is detected before factorization because the unpivoted
+    // TeamLU does not report mid-elimination singularity; the check is uniform across the team
+    // (A is read-only here), so all threads skip the same cell together.
+    for (int cell_idx = begin_cell; cell_idx < end_cell; ++cell_idx) {
         auto A_sub = Kokkos::subview(A, cell_idx, Kokkos::ALL(), Kokkos::ALL());
         auto b_sub = Kokkos::subview(b, cell_idx, Kokkos::ALL());
 
-        // Singular matrix check prior to / during LU
         bool is_singular = false;
-
-#ifdef MKPP_HAS_KOKKOS_KERNELS
-        // Check diagonal elements for zero / singular
         for (int k = 0; k < N; ++k) {
             if (Kokkos::abs(A_sub(k, k)) < 1.0e-15) {
                 is_singular = true;
                 break;
             }
         }
-
         if (is_singular) {
-            set_cell_error(error_status, cell_idx, ERR_SINGULAR_MATRIX);
-            return;
+            Kokkos::single(Kokkos::PerTeam(member), [&]() {
+                set_cell_error(error_status, cell_idx, ERR_SINGULAR_MATRIX);
+            });
+            continue;
         }
 
-        // KokkosBatched LU Factorization
-        int lu_err = KokkosBatched::SerialLU<KokkosBatched::Algo::LU::Unblocked>::invoke(A_sub);
+        // Team-layer LU factorization (unpivoted, in place: A = L * U).
+        const int lu_err = KokkosBatched::TeamLU<TeamMember, KokkosBatched::Algo::LU::Unblocked>::invoke(member, A_sub);
         if (lu_err != 0) {
-            set_cell_error(error_status, cell_idx, ERR_SINGULAR_MATRIX);
-            return;
+            Kokkos::single(Kokkos::PerTeam(member), [&]() {
+                set_cell_error(error_status, cell_idx, ERR_SINGULAR_MATRIX);
+            });
+            continue;
         }
 
-        // KokkosBatched Lower Triangular Solve (L * y = b, unit diagonal)
-        KokkosBatched::SerialTrsv<
+        // Team+vector forward substitution (L * y = b, unit diagonal).
+        KokkosBatched::TeamVectorTrsv<
+            TeamMember,
             KokkosBatched::Uplo::Lower,
             KokkosBatched::Trans::NoTranspose,
             KokkosBatched::Diag::Unit,
-            KokkosBatched::Algo::Trsv::Unblocked>::invoke(1.0, A_sub, b_sub);
+            KokkosBatched::Algo::Trsv::Unblocked>::invoke(member, 1.0, A_sub, b_sub);
 
-        // KokkosBatched Upper Triangular Solve (U * x = y, non-unit diagonal)
-        KokkosBatched::SerialTrsv<
+        // Team+vector back substitution (U * x = y, non-unit diagonal).
+        KokkosBatched::TeamVectorTrsv<
+            TeamMember,
             KokkosBatched::Uplo::Upper,
             KokkosBatched::Trans::NoTranspose,
             KokkosBatched::Diag::NonUnit,
-            KokkosBatched::Algo::Trsv::Unblocked>::invoke(1.0, A_sub, b_sub);
+            KokkosBatched::Algo::Trsv::Unblocked>::invoke(member, 1.0, A_sub, b_sub);
+    }
 #else
+    // Fallback without KokkosKernels: one thread per cell, explicit unblocked LU + substitution.
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(member, begin_cell, end_cell), [=](const int cell_idx) {
+        auto A_sub = Kokkos::subview(A, cell_idx, Kokkos::ALL(), Kokkos::ALL());
+        auto b_sub = Kokkos::subview(b, cell_idx, Kokkos::ALL());
+
         // Unblocked LU Factorization in-place (A = L * U)
+        bool is_singular = false;
         for (int k = 0; k < N; ++k) {
             double pivot = A_sub(k, k);
             if (Kokkos::abs(pivot) < 1.0e-15) {
@@ -133,8 +152,8 @@ KOKKOS_INLINE_FUNCTION void batched_dense_solve(
             }
             b_sub(i) /= diag;
         }
-#endif
     });
+#endif
 }
 
 }  // namespace host

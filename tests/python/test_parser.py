@@ -306,15 +306,19 @@ def test_parser_performance_benchmark(tmp_path):
 
     yaml_path.write_text(yaml.dump(mech_dict))
 
-    t0 = time.perf_counter()
+    # Time CPU rather than wall clock. This benchmark runs under pytest-xdist on
+    # shared CI runners where scheduler preemption inflates wall-clock with no
+    # change to the actual parse work, making a fixed wall-clock bound flaky.
+    # CPU time measures the parser itself and is stable under contention.
+    t0 = time.process_time()
     m1 = load_mechanism(json_path)
-    t_json = time.perf_counter() - t0
+    t_json = time.process_time() - t0
 
-    t0 = time.perf_counter()
+    t0 = time.process_time()
     m2 = load_mechanism(yaml_path)
-    t_yaml = time.perf_counter() - t0
+    t_yaml = time.process_time() - t0
 
     assert len(m1.reactions) == 500
     assert len(m2.reactions) == 500
-    assert t_json < 0.5, f"JSON parse took {t_json:.3f}s (target <0.5s)"
-    assert t_yaml < 0.5, f"YAML parse took {t_yaml:.3f}s (target <0.5s)"
+    assert t_json < 0.5, f"JSON parse took {t_json:.3f}s CPU (target <0.5s)"
+    assert t_yaml < 0.5, f"YAML parse took {t_yaml:.3f}s CPU (target <0.5s)"

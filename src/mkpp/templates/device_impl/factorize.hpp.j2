@@ -1,0 +1,20 @@
+{# Shared algebra: inline and device-callable by default; emitted out of line
+   when MKPP_DEFINE_HOST_KERNELS is set by a separate CPU implementation unit.
+#}
+#pragma once
+#include <Kokkos_Core.hpp>
+namespace mkpp::generated::{{ mechanism_name }}::detail {
+{% for expressions in compiled_lu_chunks %}
+#if defined(MKPP_DEFINE_HOST_KERNELS)
+void
+#else
+KOKKOS_INLINE_FUNCTION void
+#endif
+factorize_lu_chunk_{{ loop.index0 }}(const double* w, double* lu) {
+  constexpr int N = {{ num_species }};
+{% for entry in expressions %}
+  lu[{{ entry.i }} * N + {{ entry.j }}] = {{ entry.expr }};
+{% endfor %}
+}
+{% endfor %}
+}  // namespace mkpp::generated::{{ mechanism_name }}::detail

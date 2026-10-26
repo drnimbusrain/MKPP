@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from mkpp.codegen import generate_headers
 
@@ -141,19 +143,20 @@ def test_template_declares_compiled_rate_units():
     from mkpp.template_context import build_template_context
     from mkpp.template_engine import render_template
 
-    # Expression-heavy fluxes belong in compiled units, not every consuming TU.
+    # Expression-heavy fluxes are emitted in bounded implementation fragments
+    # (inline device-callable definitions), not hand-written into the integrator.
     mech = load_mechanism("mechanisms/openatmos/chapman/mechanism.json")
     mech.sympy_metadata = prepare_unified_jacobian(mech)
     ctx = build_template_context(mech)
-    rendered = render_template("header.j2", ctx)
-    assert "compute_rates_chunk_0" in rendered
+    rendered = render_template("device_impl/rates.hpp.j2", ctx)
+    assert "KOKKOS_INLINE_FUNCTION void\n#endif\ncompute_rates_chunk_0" in rendered
 
     # The same contract applies to larger mechanisms.
     mech_saprc = load_mechanism("mechanisms/openatmos/saprc99_mini/mechanism.json")
     mech_saprc.sympy_metadata = prepare_unified_jacobian(mech_saprc)
     ctx_saprc = build_template_context(mech_saprc)
-    rendered_saprc = render_template("header.j2", ctx_saprc)
-    assert "compute_rates_chunk_0" in rendered_saprc
+    rendered_saprc = render_template("device_impl/rates.hpp.j2", ctx_saprc)
+    assert "KOKKOS_INLINE_FUNCTION void\n#endif\ncompute_rates_chunk_0" in rendered_saprc
 
 
 def test_continuous_transition_annotations(tmp_path):
@@ -251,11 +254,13 @@ def test_codegen_emits_sympy_jacobian(tmp_path):
     with open(results["header"]) as f:
         content = f.read()
 
-    # The derivative lives in a compiled Jacobian unit, while the public
-    # header retains only the stable dispatch declaration.
+    # The public header dispatches to the chunked Jacobian helpers, whose
+    # inline device-callable definitions live in the shared implementation
+    # fragment that both the header and the compiled translation unit include.
     assert "compute_jacobian_chunk_0" in content
-    compiled_source = next(path for path in results["compiled_sources"] if path.endswith("/jacobian.cpp"))
-    assert "jvals[0]" in open(compiled_source).read()
+    jacobian_source = next(path for path in results["compiled_sources"] if path.endswith("/jacobian.cpp"))
+    jacobian_fragment = str(Path(jacobian_source).with_suffix(".hpp"))
+    assert "jvals[0]" in open(jacobian_fragment).read()
 
 
 def test_all_rosenbrock_tableaus_codegen(tmp_path):

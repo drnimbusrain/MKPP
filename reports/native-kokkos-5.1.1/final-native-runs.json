@@ -1,0 +1,102 @@
+[
+  {
+    "solver": "mkpp",
+    "mechanism": "chapman",
+    "command": [
+      "/workspace/scratch/c30a2a2efea9/MKPP-feature-gpu/build/native-split-kokkos-5.1.1/benchmarks/solver_comparison/runners/mkpp/solver_benchmark_mkpp",
+      "--mechanism",
+      "chapman",
+      "--cells",
+      "1",
+      "--steps",
+      "10",
+      "--dt",
+      "60",
+      "--warmups",
+      "1",
+      "--repetitions",
+      "1"
+    ],
+    "binary_sha256": "02a0727463755d8fd601b6864e1f398e0eba3f685ecf17cb845a8e1bd1cc9d90",
+    "returncode": 0,
+    "status": "success",
+    "warmups": 1,
+    "repetitions": 1,
+    "optimization": "-O3 -DNDEBUG",
+    "wall_seconds": 0.005496413999935612,
+    "final_time_seconds": 600,
+    "all_finite": true,
+    "species_count": 4,
+    "matches_prior_split_state_exactly": true,
+    "publication_eligible": false
+  },
+  {
+    "solver": "mkpp",
+    "mechanism": "ts1",
+    "command": [
+      "/workspace/scratch/c30a2a2efea9/MKPP-feature-gpu/build/native-split-kokkos-5.1.1/benchmarks/solver_comparison/runners/mkpp/solver_benchmark_mkpp",
+      "--mechanism",
+      "ts1",
+      "--cells",
+      "1",
+      "--steps",
+      "10",
+      "--dt",
+      "60",
+      "--warmups",
+      "1",
+      "--repetitions",
+      "1"
+    ],
+    "binary_sha256": "02a0727463755d8fd601b6864e1f398e0eba3f685ecf17cb845a8e1bd1cc9d90",
+    "returncode": 0,
+    "status": "success",
+    "warmups": 1,
+    "repetitions": 1,
+    "optimization": "-O3 -DNDEBUG",
+    "wall_seconds": 12.324002625000048,
+    "final_time_seconds": 600,
+    "all_finite": true,
+    "species_count": 210,
+    "matches_prior_split_state_exactly": true,
+    "publication_eligible": false
+  },
+  {
+    "solver": "micm",
+    "mechanism": "chapman",
+    "command": [
+      "/workspace/scratch/c30a2a2efea9/MKPP-feature-gpu/build/native-split-kokkos-5.1.1/benchmarks/solver_comparison/runners/micm/solver_benchmark_micm"
+    ],
+    "binary_sha256": "0e25ddbbbe487620eb62b677e45966e2c64ec59ed9214e660ec8294f8a513ea3",
+    "returncode": 0,
+    "status": "success",
+    "warmups": 1,
+    "repetitions": 1,
+    "optimization": "-O3 -DNDEBUG",
+    "wall_seconds": 0.004795543999989604,
+    "final_time_seconds": 600,
+    "all_finite": true,
+    "species_count": 4,
+    "matches_prior_split_state_exactly": true,
+    "publication_eligible": false
+  },
+  {
+    "solver": "micm-ts1",
+    "mechanism": "ts1",
+    "command": [
+      "/workspace/scratch/c30a2a2efea9/MKPP-feature-gpu/build/native-split-kokkos-5.1.1/benchmarks/solver_comparison/runners/micm/ts1/solver_benchmark_micm_ts1"
+    ],
+    "binary_sha256": "866a279030e37ff217734a0d4751a4e757ccb0add47b6c8e7d77e050e40df5b6",
+    "returncode": 0,
+    "status": "success",
+    "warmups": 1,
+    "repetitions": 1,
+    "optimization": "-O3 -DNDEBUG",
+    "wall_seconds": 0.5369104240003253,
+    "final_time_seconds": 600,
+    "all_finite": true,
+    "species_count": 210,
+    "matches_prior_split_state_exactly": true,
+    "publication_eligible": false
+  }
+]

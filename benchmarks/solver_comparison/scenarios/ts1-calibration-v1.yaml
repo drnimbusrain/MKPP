@@ -1,10 +1,10 @@
 schema_version: 1
 scenario_id: ts1-calibration-v1
-version: 1.0.0
+version: 1.1.0
 mechanism:
   id: ts1
-  version: 1.0.0
-  sha256: f5c31297ba5e38c17e49607ed2b7bcbf194b412fe49f819c23c66548e6f532de
+  version: 1.1.0
+  sha256: 83b997e913194dd66046e7f76d54538dbed7e717f2ecb569e73d2c5f38b71732
 role: calibration
 initial_state:
   ALKNIT:

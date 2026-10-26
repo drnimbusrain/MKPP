@@ -8,6 +8,7 @@ import random
 import statistics
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from itertools import permutations
 from pathlib import Path
 from typing import TypeVar
 
@@ -26,15 +27,21 @@ class CollectedBlock:
 
 
 def balanced_order(solvers: Sequence[_T], *, blocks: int, seed: int) -> tuple[tuple[_T, ...], ...]:
-    """Return seeded cyclic solver orders, balanced across every solver position."""
+    """Balance positions and predecessor effects using shuffled permutation cycles."""
 
     if not solvers or len(set(solvers)) != len(solvers):
         raise ValueError("solvers must be a non-empty unique sequence")
     if blocks <= 0:
         raise ValueError("blocks must be positive")
-    base = list(solvers)
-    random.Random(seed).shuffle(base)
-    return tuple(tuple(base[(offset + position) % len(base)] for position in range(len(base))) for offset in range(blocks))
+    if len(solvers) > 3:
+        raise ValueError("solver comparison supports at most three subjects")
+    generator = random.Random(seed)
+    orders = list(permutations(solvers))
+    collected: list[tuple[_T, ...]] = []
+    while len(collected) < blocks:
+        generator.shuffle(orders)
+        collected.extend(orders)
+    return tuple(collected[:blocks])
 
 
 def common_repetition_count(
@@ -46,7 +53,7 @@ def common_repetition_count(
 ) -> int:
     """Double shared work until its three-observation median reaches the policy floor."""
 
-    if initial <= 0 or minimum_seconds <= 0 or maximum < initial:
+    if initial <= 0 or not math.isfinite(minimum_seconds) or minimum_seconds <= 0 or maximum < initial:
         raise ValueError("invalid pilot bounds")
     repetitions = initial
     while repetitions <= maximum:
@@ -57,6 +64,35 @@ def common_repetition_count(
             return repetitions
         repetitions *= 2
     raise RuntimeError("pilot did not reach minimum sample duration")
+
+
+def paired_repetition_count(
+    measure: Callable[[int], dict[_T, Sequence[float]]],
+    *,
+    minimum_seconds: float = 1.0,
+    maximum: int = 1 << 30,
+) -> int:
+    """Pilot every subject at each common count; require every subject to pass.
+
+    Independent pilots followed by a maximum assume runtime is monotonic. This
+    procedure observes every subject at the actual final shared count instead.
+    """
+    if not math.isfinite(minimum_seconds) or minimum_seconds <= 0 or maximum < 1:
+        raise ValueError("invalid pilot bounds")
+    repetitions = 1
+    subjects: set[_T] | None = None
+    while repetitions <= maximum:
+        samples = measure(repetitions)
+        if not samples or (subjects is not None and set(samples) != subjects):
+            raise ValueError("pilot subject identities must be non-empty and constant")
+        subjects = set(samples)
+        for durations in samples.values():
+            if len(durations) != 3 or any(not math.isfinite(value) or value < 0 for value in durations):
+                raise ValueError("each pilot subject must return three finite non-negative durations")
+        if all(statistics.median(durations) >= minimum_seconds for durations in samples.values()):
+            return repetitions
+        repetitions *= 2
+    raise RuntimeError("paired pilot did not reach minimum sample duration")
 
 
 def stable_warmup_count(
@@ -125,7 +161,7 @@ def append_raw_record(path: Path, record: object) -> None:
     """Append one immutable JSON evidence record; never rewrite prior evidence."""
 
     with path.open("a", encoding="utf-8") as output:
-        output.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
+        output.write(json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False))
         output.write("\n")
 
 
@@ -136,5 +172,6 @@ __all__ = [
     "balanced_order",
     "collect_paired_blocks",
     "common_repetition_count",
+    "paired_repetition_count",
     "stable_warmup_count",
 ]

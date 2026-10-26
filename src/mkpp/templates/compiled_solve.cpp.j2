@@ -1,13 +1,5 @@
-// Generated sparse forward/back substitution for {{ mechanism_name }}.
-namespace mkpp::generated::{{ mechanism_name }}::detail {
-void solve_lu(const double* lu, const double* rhs, double* solution) {
-  constexpr int N = {{ num_species }};
-  double work[N];
-{% for step in compiled_forward_steps %}
-  work[{{ step.index }}] = {{ step.expr }};
-{% endfor %}
-{% for step in compiled_backward_steps %}
-  solution[{{ step.index }}] = {{ step.expr }};
-{% endfor %}
-}
-}  // namespace mkpp::generated::{{ mechanism_name }}::detail
+// Generated {{ mechanism_name }} kernel definitions from the shared implementation.
+#if defined(MKPP_SEPARATE_HOST_KERNELS_{{ mechanism_name | upper }})
+#define MKPP_DEFINE_HOST_KERNELS
+#endif
+#include "solve.hpp"

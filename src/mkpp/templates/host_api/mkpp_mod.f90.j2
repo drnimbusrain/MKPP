@@ -20,6 +20,7 @@ module mkpp_mod
   integer(c_int), parameter, public :: MKPP_ERROR_NOT_FOUND   = -106_c_int
 
   ! Mechanism Constants
+  integer, parameter, public :: MKPP_NUM_RATE_PARAMETERS = {{ num_runtime_parameters }}
   integer, parameter, public :: MKPP_NUM_SPECIES   = {{ num_species }}
   integer, parameter, public :: MKPP_NUM_REACTIONS = {{ num_reactions }}
   integer, parameter, public :: MKPP_NUM_PHOTOLYSIS = {{ num_photolysis | default(0) }}
@@ -39,7 +40,9 @@ module mkpp_mod
   public :: mkpp_get_species_index
   public :: mkpp_get_photolysis_index
   public :: mkpp_set_state_ptrs
+  public :: mkpp_set_rate_parameter_ptrs
   public :: mkpp_set_photolysis_ptrs
+  public :: mkpp_set_cloud_water_ptr
   public :: mkpp_set_aerosol_ptrs
   public :: mkpp_integrate
   public :: mkpp_evaluate_rates
@@ -114,12 +117,25 @@ module mkpp_mod
       type(c_ptr), value, intent(in) :: rho
     end function c_mkpp_set_state_ptrs
 
+    function c_mkpp_set_rate_parameter_ptrs(handle, values, count) bind(C, name="mkpp_set_rate_parameter_ptrs")
+      use, intrinsic :: iso_c_binding
+      integer(c_int) :: c_mkpp_set_rate_parameter_ptrs
+      type(c_ptr), value, intent(in) :: handle, values
+      integer(c_size_t), value, intent(in) :: count
+    end function c_mkpp_set_rate_parameter_ptrs
+
     function c_mkpp_set_photolysis_ptrs(handle, photo) bind(C, name="mkpp_set_photolysis_ptrs")
       use, intrinsic :: iso_c_binding
       integer(c_int) :: c_mkpp_set_photolysis_ptrs
       type(c_ptr), value, intent(in) :: handle
       type(c_ptr), value, intent(in) :: photo
     end function c_mkpp_set_photolysis_ptrs
+
+    function c_mkpp_set_cloud_water_ptr(handle, values) bind(C, name="mkpp_set_cloud_water_ptr")
+      use, intrinsic :: iso_c_binding
+      integer(c_int) :: c_mkpp_set_cloud_water_ptr
+      type(c_ptr), value, intent(in) :: handle, values
+    end function c_mkpp_set_cloud_water_ptr
 
     function c_mkpp_set_aerosol_ptrs(handle, rh, sa) bind(C, name="mkpp_set_aerosol_ptrs")
       use, intrinsic :: iso_c_binding
@@ -247,12 +263,34 @@ contains
     status = int(c_mkpp_set_state_ptrs(handle%ptr, c_loc(conc(1,1)), c_loc(temp(1)), c_loc(pres(1)), c_loc(rho(1))))
   end subroutine mkpp_set_state_ptrs
 
+  subroutine mkpp_set_rate_parameter_ptrs(handle, values, status)
+    type(mkpp_handle_t), intent(in) :: handle
+    real(c_double), target, intent(in) :: values(:,:)
+    integer, intent(out) :: status
+    if (.not. is_contiguous(values) .or. size(values, 1) == 0 .or. size(values, 2) /= MKPP_NUM_RATE_PARAMETERS) then
+      status = MKPP_ERROR_INVALID_ARG
+      return
+    end if
+    status = int(c_mkpp_set_rate_parameter_ptrs(handle%ptr, c_loc(values(1,1)), int(size(values,2), c_size_t)))
+  end subroutine mkpp_set_rate_parameter_ptrs
+
   subroutine mkpp_set_photolysis_ptrs(handle, photo, status)
     type(mkpp_handle_t), intent(in) :: handle
     real(c_double), target, intent(in) :: photo(:,:)
     integer, intent(out) :: status
     status = int(c_mkpp_set_photolysis_ptrs(handle%ptr, c_loc(photo(1,1))))
   end subroutine mkpp_set_photolysis_ptrs
+
+  subroutine mkpp_set_cloud_water_ptr(handle, values, status)
+    type(mkpp_handle_t), intent(in) :: handle
+    real(c_double), target, intent(in) :: values(:)
+    integer, intent(out) :: status
+    if (.not. is_contiguous(values) .or. size(values) == 0) then
+      status = MKPP_ERROR_INVALID_ARG
+      return
+    end if
+    status = int(c_mkpp_set_cloud_water_ptr(handle%ptr, c_loc(values(1))))
+  end subroutine mkpp_set_cloud_water_ptr
 
   subroutine mkpp_set_aerosol_ptrs(handle, rh, sa, status)
     type(mkpp_handle_t), intent(in) :: handle

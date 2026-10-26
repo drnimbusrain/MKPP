@@ -67,6 +67,8 @@ def _validate_candidate(candidate: CalibrationCandidate) -> None:
         raise ValueError("calibration candidate metrics must be finite")
     if any(value <= 0.0 for value in candidate.paired_block_times_ms):
         raise ValueError("calibration block times must be positive")
+    if candidate.maximum_error < 0 or candidate.wrms < 0:
+        raise ValueError("calibration error metrics cannot be negative")
     if candidate.rejected_steps is not None and candidate.rejected_steps < 0:
         raise ValueError("rejected step count cannot be negative")
 
@@ -78,9 +80,15 @@ def select_equal_accuracy_configuration(
     """Select the fastest eligible candidate using the frozen tie-break policy."""
 
     _validate_context(context)
+    if len({candidate.configuration_id for candidate in candidates}) != len(candidates):
+        raise ValueError("calibration configuration IDs must be unique")
     for candidate in candidates:
         _validate_candidate(candidate)
-    eligible = [candidate for candidate in candidates if candidate.passed_all_gates]
+    eligible = [
+        candidate
+        for candidate in candidates
+        if candidate.passed_all_gates and candidate.maximum_error <= 5.0 and candidate.wrms <= 1.0
+    ]
     if not eligible:
         raise ValueError("no eligible equal-accuracy calibration candidate")
 

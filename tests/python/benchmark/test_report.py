@@ -25,8 +25,8 @@ def test_pairwise_ratio_names_its_baseline_and_withholds_ineligible_pairs() -> N
     comparison = derive_pairwise_comparison(
         baseline_solver_id="micm",
         candidate_solver_id="mkpp",
-        baseline_seconds=(4.0, 6.0),
-        candidate_seconds=(2.0, 3.0),
+        baseline_seconds=(4.0, 6.0) * 5,
+        candidate_seconds=(2.0, 3.0) * 5,
         eligible=True,
         seed=11,
     )
@@ -122,3 +122,65 @@ def test_json_and_csv_reports_preserve_boundaries_and_uncertainty() -> None:
     assert "steady_state_solve" in csv
     assert "1.1" in csv
     assert "lifecycle" not in csv
+
+
+def test_two_samples_cannot_be_published_as_a_qualified_speedup():
+    comparison = derive_pairwise_comparison(
+        baseline_solver_id="kpp",
+        candidate_solver_id="mkpp",
+        baseline_seconds=(2.0, 3.0),
+        candidate_seconds=(1.0, 1.0),
+        eligible=True,
+        seed=17,
+    )
+    assert comparison["status"] == "withheld"
+    assert "10 valid paired blocks" in comparison["withheld_reason"]
+
+
+def test_verified_comparison_aligns_by_block_and_rejects_duplicates():
+    from mkpp.benchmark.models import SolverId
+    from mkpp.benchmark.report import derive_verified_comparison
+
+    from .test_campaign import run
+
+    baseline = tuple(run(SolverId.MICM, block, elapsed=4.0) for block in range(10))
+    candidate = tuple(run(SolverId.MKPP, block, elapsed=2.0) for block in reversed(range(10)))
+    result = derive_verified_comparison(baseline, candidate, scientific_eligible=True, seed=17)
+    assert result["median_ratio"] == 2.0
+    assert result["bootstrap_interval"] == (2.0, 2.0)
+    duplicate = derive_verified_comparison(baseline + (baseline[0],), candidate, scientific_eligible=True, seed=17)
+    assert duplicate["status"] == "withheld"
+    assert "duplicate" in duplicate["withheld_reason"]
+    failed_science = derive_verified_comparison(baseline, candidate, scientific_eligible=False, seed=17)
+    assert failed_science["median_ratio"] is None
+
+
+def test_csv_roundtrips_quotes_commas_and_newlines():
+    import csv
+    import io
+
+    reason = 'failed "O3", checkpoint\n60 s'
+    report = render_csv_report(
+        {"mechanism_id": "chapman", "steady_state_solve": [{"status": "withheld", "withheld_reason": reason}]}
+    )
+    rows = list(csv.DictReader(io.StringIO(report)))
+    assert len(rows) == 1
+    assert rows[0]["withheld_reason"] == reason
+
+
+def test_retained_samples_must_meet_declared_campaign_floors():
+    from mkpp.benchmark.models import SolverId
+    from mkpp.benchmark.report import derive_verified_comparison
+
+    from .test_campaign import run
+
+    baseline = tuple(run(SolverId.MICM, block) for block in range(10))
+    candidate = tuple(run(SolverId.MKPP, block, elapsed=0.001) for block in range(10))
+    short = derive_verified_comparison(baseline, candidate, scientific_eligible=True, seed=17)
+    assert short["median_ratio"] is None
+    assert "duration floor" in short["withheld_reason"]
+    incomplete = derive_verified_comparison(baseline, baseline, scientific_eligible=True, seed=17, minimum_valid_blocks=12)
+    assert incomplete["median_ratio"] is None
+    valid_candidate = tuple(run(SolverId.MKPP, block) for block in range(10))
+    incomplete = derive_verified_comparison(baseline, valid_candidate, scientific_eligible=True, seed=17, minimum_valid_blocks=12)
+    assert "at least 12" in incomplete["withheld_reason"]

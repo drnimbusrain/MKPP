@@ -48,7 +48,7 @@ double run_diurnal_benchmark(const std::string& mech_name, int num_cells, int nu
 
     mkpp::host::HostExecutionParams params;
     params.dt = dt;
-    params.jvals = jvals_dev.data();
+    params.jvals = jvals_dev;
     params.steps = 1;
 
     // Warmup step via host interface
@@ -85,7 +85,8 @@ int main(int argc, char** argv) {
         if (arg == "--output" && i + 1 < argc) csv_out = argv[++i];
     }
 
-    Kokkos::initialize(argc, argv);
+    // Exception-safe runtime ownership; also consumes --kokkos-* tuning args (FR-013).
+    Kokkos::ScopeGuard kokkos_scope(argc, argv);
     {
         std::vector<double> final_state;
         auto info = mkpp::host::MechanismRegistry::get_info(mech);
@@ -107,6 +108,5 @@ int main(int argc, char** argv) {
             out.close();
         }
     }
-    Kokkos::finalize();
     return 0;
 }

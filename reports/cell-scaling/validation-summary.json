@@ -1,0 +1,45 @@
+{
+  "suite": {
+    "initial_full_run": {
+      "passed": 1049,
+      "failed": 4,
+      "skipped": 32
+    },
+    "resolved_failures": [
+      "pinned auxiliary submodules checked out",
+      "property contexts updated for runtime environment and compact storage"
+    ],
+    "affected_modules_rechecked": {
+      "passed": 13,
+      "failed": 0
+    }
+  },
+  "native_serial": {
+    "passed": 4,
+    "failed": 0
+  },
+  "native_openmp_four_threads": {
+    "passed": 1,
+    "failed": 0
+  },
+  "kokkos_version": "5.1.1",
+  "compiler": "GCC 13.3.0",
+  "gpu_tested": false,
+  "fortran_compiled_locally": false,
+  "publication_eligible": false,
+  "pr_checkout": {
+    "serial": {
+      "passed": 7,
+      "failed": 0
+    },
+    "openmp_four_threads": {
+      "passed": 1,
+      "failed": 0
+    }
+  },
+  "generated_artifact_freshness": {
+    "runs": 2,
+    "files_per_run": 144,
+    "changed_files_between_runs": 0
+  }
+}

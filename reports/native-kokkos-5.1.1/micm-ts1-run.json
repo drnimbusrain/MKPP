@@ -1,0 +1,14 @@
+{
+  "case": "MUSICA v1 TS1 native MICM smoke",
+  "command": [
+    "build/native-smoke/solver_benchmark_micm_ts1"
+  ],
+  "returncode": 0,
+  "wall_seconds": 1.5411772649999875,
+  "publication_eligible": false,
+  "status": "success",
+  "solve_ms": 773.1725,
+  "cell_steps": 6,
+  "final_time": 600,
+  "named_species": 210
+}

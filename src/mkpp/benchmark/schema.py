@@ -12,8 +12,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
-_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-_CONTRACT_DIRECTORY = _REPOSITORY_ROOT / "specs/020-solver-benchmark-comparison/contracts"
+_CONTRACT_DIRECTORY = Path(__file__).resolve().parent / "contracts"
 
 
 class SchemaValidationError(ValueError):

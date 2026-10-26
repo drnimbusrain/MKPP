@@ -156,7 +156,7 @@ TEST(E2ESolverValidation, MechanismIntegration) {
     // Photolysis J-values: computed per-step to match KPP's diurnal SUN cycle.
     // For mechanisms without photolysis (n_spec < 79), jvals remains zero.
     std::vector<double> jvals_data(64, 0.0);
-    const double* jvals = jvals_data.data();
+    mkpp::host::JvalsView<typename ExecSpace::memory_space> jvals(jvals_data.data(), jvals_data.size());
 
     auto start = std::chrono::high_resolution_clock::now();
 
@@ -198,9 +198,8 @@ TEST(E2ESolverValidation, MechanismIntegration) {
 }
 
 int main(int argc, char** argv) {
-    Kokkos::initialize(argc, argv);
+    // Exception-safe runtime ownership; also consumes --kokkos-* tuning args (FR-013).
+    Kokkos::ScopeGuard kokkos_scope(argc, argv);
     ::testing::InitGoogleTest(&argc, argv);
-    int result = RUN_ALL_TESTS();
-    Kokkos::finalize();
-    return result;
+    return RUN_ALL_TESTS();
 }

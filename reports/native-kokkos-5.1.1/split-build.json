@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/workspace/scratch/c30a2a2efea9/MKPP-feature-gpu/.venv/bin/cmake",
+    "--build",
+    "build/native-split-kokkos-5.1.1",
+    "--target",
+    "solver_benchmark_mkpp",
+    "solver_benchmark_micm",
+    "solver_benchmark_micm_ts1",
+    "--parallel",
+    "2"
+  ],
+  "returncode": 0,
+  "elapsed_seconds": 126.42224080300002,
+  "optimization": "Release -O3 -DNDEBUG",
+  "publication_eligible": false
+}

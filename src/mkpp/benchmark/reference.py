@@ -103,6 +103,8 @@ def integration_segments(
 
 
 def _validate_trajectory_pair(r1: ReferenceTrajectory, r2: ReferenceTrajectory, atols: Mapping[str, float]) -> None:
+    if not atols:
+        raise ValueError("reference species and atol sets must not be empty")
     if not r1 or set(r1) != set(r2):
         raise ValueError("reference checkpoint sets must be non-empty and identical")
     for checkpoint, r1_state in r1.items():
@@ -137,7 +139,7 @@ def assess_reference_convergence(
                 error = symmetric_scaled_error(second, first, atol_by_species[species], subject_rtol)
             errors.append(error)
             maximum = max(maximum, abs(error))
-        checkpoint_wrms.append(math.sqrt(math.fsum(error * error for error in errors) / len(errors)))
+        checkpoint_wrms.append(math.hypot(*errors) / math.sqrt(len(errors)))
     worst_wrms = max(checkpoint_wrms)
     diagnostics: list[str] = []
     if not finite:

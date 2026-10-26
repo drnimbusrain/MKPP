@@ -44,7 +44,8 @@ TEST(E2EBatchedTest, DynamicBatchSizesTeamPolicy) {
         }
         Kokkos::deep_copy(state, h_state);
 
-        double jvals[2] = {1.0e-5, 1.0e-3};
+        double jvals_data[2] = {1.0e-5, 1.0e-3};
+        mkpp::host::JvalsView<Kokkos::HostSpace> jvals(jvals_data, 2);
         mkpp::host::BatchErrorStatus error_status(num_cells);
 
         mkpp::host::execute_mechanism_steps_batched<ChapmanSolver<DeviceType>>(
@@ -63,7 +64,8 @@ TEST(E2EBatchedTest, MultiCellTrajectoryParity) {
     const int num_cells = 128;
     const double dt = 60.0;
     const int steps = 10;
-    double jvals[2] = {1.0e-5, 1.0e-3};
+    double jvals_data[2] = {1.0e-5, 1.0e-3};
+    mkpp::host::JvalsView<Kokkos::HostSpace> jvals(jvals_data, 2);
 
     // State array for single-cell serial execution
     StateView state_serial("state_serial", num_cells, 4, 1, 1);
@@ -115,7 +117,8 @@ TEST(E2EBatchedTest, FaultIsolationNonFiniteErrorInjection) {
     const int num_cells = 100;
     const double dt = 60.0;
     const int steps = 2;
-    double jvals[2] = {1.0e-5, 1.0e-3};
+    double jvals_data[2] = {1.0e-5, 1.0e-3};
+    mkpp::host::JvalsView<Kokkos::HostSpace> jvals(jvals_data, 2);
 
     StateView state("state", num_cells, 4, 1, 1);
     auto h_state = Kokkos::create_mirror_view(state);
@@ -153,8 +156,7 @@ TEST(E2EBatchedTest, FaultIsolationNonFiniteErrorInjection) {
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
-    Kokkos::initialize(argc, argv);
-    int result = RUN_ALL_TESTS();
-    Kokkos::finalize();
-    return result;
+    // Exception-safe runtime ownership; also consumes --kokkos-* tuning args (FR-013).
+    Kokkos::ScopeGuard kokkos_scope(argc, argv);
+    return RUN_ALL_TESTS();
 }

@@ -89,6 +89,8 @@ def assess_repeatability(first_throughputs: Sequence[float], second_throughputs:
 
     if not first_throughputs or not second_throughputs:
         return False
+    if any(not math.isfinite(value) or value <= 0 for value in (*first_throughputs, *second_throughputs)):
+        return False
     first = statistics.median(first_throughputs)
     second = statistics.median(second_throughputs)
     return first > 0.0 and second > 0.0 and abs(second - first) / first <= 0.05

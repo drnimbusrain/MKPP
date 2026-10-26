@@ -203,11 +203,16 @@ void synchronize_completion() {
     Kokkos::fence("synchronize steady-state solve completion");
 }
 
-void execute_solve(StateView state, const Options& options, const double* jvals) {
+void execute_solve(StateView state, const Options& options, const mkpp::host::JvalsView<typename ExecutionSpace::memory_space>& jvals) {
     mkpp::host::HostExecutionParams parameters;
     parameters.dt = options.dt;
     parameters.jvals = jvals;
+    parameters.jvals_extent = jvals.extent(0);
     parameters.steps = options.steps;
+    if (options.mechanism == "ts1") {
+        parameters.temp = 287.45;
+        parameters.air_density = 42.393400541636808;
+    }
     // Dispatch is deliberately by the governed mechanism name. In particular, TS1
     // reaches the generated native kernel through the host registry, never a
     // Chapman-shaped placeholder or a raw species-index adapter.
@@ -282,8 +287,15 @@ void emit_json_result(const Options& options, double elapsed_ms,
 
 int main(int argc, char** argv) {
     try {
+        // Own the Kokkos runtime lifetime through an exception-safe scope
+        // guard. Constructing it before the benchmark's own argument parsing
+        // lets Kokkos consume its documented runtime-tuning arguments
+        // (--kokkos-num-threads, --kokkos-device-id, ...) and shrink argc so
+        // parse_options only sees benchmark flags. The guard finalizes on every
+        // exit path, including a throw from argument parsing, so the catch
+        // handler no longer needs a manual finalize (FR-013).
+        Kokkos::ScopeGuard kokkos_scope(argc, argv);
         const Options options = parse_options(argc, argv);
-        Kokkos::initialize();
         {
             if (!mkpp::host::MechanismRegistry::has_mechanism(options.mechanism)) {
                 fatal("MKPP " + options.mechanism +
@@ -328,7 +340,7 @@ int main(int argc, char** argv) {
                     Options segment_options = options;
                     segment_options.dt = interval_seconds[segment];
                     segment_options.steps = 1;
-                    execute_solve(state, segment_options, jvals.data());
+                    execute_solve(state, segment_options, jvals);
                 }
             };
 
@@ -345,7 +357,7 @@ int main(int argc, char** argv) {
                         auto cell_state = Kokkos::subview(state, cell, Kokkos::ALL());
                         auto cell_rhs = Kokkos::subview(rhs, cell, Kokkos::ALL());
                         mkpp::generated::ts1::SolverKernels<ExecutionSpace>{}.compute_rates(
-                            cell_state, cell_rhs, jvals.data());
+                            cell_state, cell_rhs, jvals);
                     });
                 synchronize_completion();
                 const auto initial_rhs = copy_final_state(rhs);
@@ -355,14 +367,13 @@ int main(int argc, char** argv) {
                     std::cout << '"' << ts1_binding::species_names[index] << "\":" << initial_rhs[index];
                 }
                 std::cout << "}\n";
-                Kokkos::finalize();
                 return EXIT_SUCCESS;
             }
 
             for (int warmup = 0; warmup < options.warmups; ++warmup) {
             reset_state(state, options);
             if (options.mechanism == "ts1") execute_ts1_schedule();
-            else execute_solve(state, options, jvals.data());
+            else execute_solve(state, options, jvals);
                 synchronize_completion();
             }
 
@@ -371,7 +382,7 @@ int main(int argc, char** argv) {
                 reset_state(state, options);  // Reset is deliberately outside every timed sample.
                 const auto started = start_timing();
                 if (options.mechanism == "ts1") execute_ts1_schedule();
-                else execute_solve(state, options, jvals.data());
+                else execute_solve(state, options, jvals);
                 synchronize_completion();
                 elapsed_ms += stop_timing(started);
             }
@@ -384,13 +395,13 @@ int main(int argc, char** argv) {
             }
             emit_json_result(options, elapsed_ms, final_state);
         }
-        Kokkos::finalize();
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
+        // The scope guard declared in the try block owns finalization and is
+        // destroyed during unwinding, so no manual finalize is needed here.
         std::cerr << (std::string_view(error.what()).starts_with("FATAL ERROR:") ? ""
                                                                                  : "FATAL ERROR: ")
                   << error.what() << '\n';
-        if (Kokkos::is_initialized()) Kokkos::finalize();
         return EXIT_FAILURE;
     }
 }

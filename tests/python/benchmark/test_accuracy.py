@@ -104,3 +104,19 @@ def test_missing_checkpoint_or_species_fails_instead_of_comparing_partial_state(
 def test_error_scale_must_be_strictly_positive(atol: float, rtol: float) -> None:
     with pytest.raises(ValueError, match="atol|rtol|positive"):
         symmetric_scaled_error(1.0, 1.0, atol, rtol)
+
+
+def test_empty_member_cannot_hide_missing_trajectory():
+    with pytest.raises(ValueError, match="checkpoints.*empty"):
+        assess_trajectory_accuracy({0: {}}, {0: {}}, ATOL, RTOL)
+
+
+def test_binary64_extremes_do_not_turn_large_error_into_zero():
+    assert symmetric_scaled_error(1e308, -1e308, 1.0, 1e-4) == pytest.approx(20000.0)
+    assert symmetric_scaled_error(1e308, 0.0, 1.0, 10.0) == pytest.approx(0.1)
+
+
+def test_large_scaled_errors_are_ineligible_without_overflow_crash():
+    result = assess_trajectory_accuracy({0: {1.0: {"A": 1e308}}}, {0: {1.0: {"A": 0.0}}}, {"A": 1e-300}, 1e-300)
+    assert not result.eligible
+    assert result.aggregate_errors.wrms > 1.0

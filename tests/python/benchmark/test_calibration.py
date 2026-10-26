@@ -154,3 +154,22 @@ def test_selected_configuration_is_hash_bound_and_immutable_before_measurement()
     assert frozen.frozen is True
     with pytest.raises(FrozenInstanceError):
         frozen.configuration_sha256 = "b" * 64
+
+
+def test_duplicate_candidate_id_cannot_replace_another_candidates_timing():
+    with pytest.raises(ValueError, match="IDs must be unique"):
+        select_equal_accuracy_configuration([candidate("a", median_ms=100), candidate("a", median_ms=10)], context())
+
+
+@pytest.mark.parametrize("field", ["maximum_error", "wrms"])
+def test_negative_error_metric_is_not_calibration_evidence(field):
+    with pytest.raises(ValueError, match="cannot be negative"):
+        select_equal_accuracy_configuration([candidate("a", **{field: -1.0})], context())
+
+
+@pytest.mark.parametrize("metrics", [{"maximum_error": 6.0}, {"wrms": 1.1}])
+def test_eligibility_flag_cannot_override_failed_accuracy_metrics(metrics):
+    selected = select_equal_accuracy_configuration(
+        [candidate("a", median_ms=10.0, passed=True, **metrics), candidate("b", median_ms=100.0)], context()
+    )
+    assert selected.configuration_id == "b"

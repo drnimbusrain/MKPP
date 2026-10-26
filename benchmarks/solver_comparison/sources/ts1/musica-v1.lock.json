@@ -1,0 +1,17 @@
+{
+  "package": "musica",
+  "package_version": "0.16.5",
+  "configuration_version": "1.0.0",
+  "files": [
+    {
+      "package_path": "musica/configs/v1/ts1/ts1.json",
+      "vendored_path": "benchmarks/solver_comparison/sources/ts1/musica-config/ts1.json",
+      "sha256": "83b997e913194dd66046e7f76d54538dbed7e717f2ecb569e73d2c5f38b71732"
+    },
+    {
+      "package_path": "musica/configs/v1/ts1/initial_conditions.csv",
+      "vendored_path": "benchmarks/solver_comparison/sources/ts1/musica-config/initial_conditions.csv",
+      "sha256": "58db29256362fcd7fd60d47fe3d463c566dfbe14c000757202393fa7a28a9253"
+    }
+  ]
+}

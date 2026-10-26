@@ -1,0 +1,12 @@
+[
+  {
+    "case": "after-CMake-rule-update",
+    "returncode": 0,
+    "elapsed_seconds": 122.33581408700002
+  },
+  {
+    "case": "no-source-changes",
+    "returncode": 0,
+    "elapsed_seconds": 0.16613588600012008
+  }
+]

@@ -63,6 +63,16 @@ def test_generate_host_api_headers_standalone(dummy_mechanism, tmp_path):
     assert '"O3"' in c_api_content
 
 
+def test_host_api_validates_fixed_layout_view_extents(dummy_mechanism, tmp_path):
+    results = generate_host_api_headers(dummy_mechanism, out_dir=str(tmp_path))
+
+    c_api_content = open(results["c_api_source"]).read()
+    assert "Kokkos::LayoutLeft" in c_api_content
+    assert "species_conc.extent(0)" in c_api_content
+    assert "species_conc.extent(1)" in c_api_content
+    assert "FATAL ERROR:" in c_api_content
+
+
 def test_generate_headers_with_host_api_flag(dummy_mechanism, tmp_path):
     out_dir = str(tmp_path)
     results = generate_headers(dummy_mechanism, out_dir=out_dir, generate_host_api=True)

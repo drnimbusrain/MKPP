@@ -48,10 +48,29 @@
       // Walks backward through saved steps, accumulating adjoint variable lambda.
       template <class StateView, class AdjView>
       KOKKOS_INLINE_FUNCTION void integrate_adj(
+{% if has_runtime_environment %}
           double dt_total, const StateView& state_final,
-          AdjView& lambda, const double* jvals,
+          AdjView& lambda, Kokkos::View<const double*, memory_space> jvals_view,
+          const CheckpointBuffer& chk, const double temp = {{ environment_temperature | default(300.0) }}, const double rh = 0.5{% if has_cloud_gated %}, const double clw = 0.0{% endif %}, const double air_density = {{ environment_air_density | default(2.4476e19) }}) const
+{% else %}
+          double dt_total, const StateView& state_final,
+          AdjView& lambda, Kokkos::View<const double*, memory_space> jvals_view,
           const CheckpointBuffer& chk) const
+{% endif %}
       {
+          const double* jvals = jvals_view.data();
+{% if has_runtime_environment %}
+          // Environment conditions must match the forward checkpoint so the
+          // recomputed Jacobian reflects the same rate law the state was
+          // integrated under.
+          const double Temp = temp;
+          const double RH = rh;
+          const double AirDensity = air_density;
+          (void)RH;  // Reserved for future deliquescence modeling
+{% if has_cloud_gated %}
+          const double CLW = clw;
+{% endif %}
+{% endif %}
           const double g = {{ "%.17g" | format(tableau.Gamma[0]) }};
 
           // --- Discrete Adjoint: backward integration over checkpointed steps ---
@@ -64,7 +83,7 @@
               const double S_{{ k }} = chk.state[step][{{ k }}];
 {% endfor %}
 
-              // Recompute Jacobian at checkpointed state (recompute-J strategy, D1)
+              // Recompute Jacobian at checkpointed state (recompute-J strategy)
 {% for entry in jacobian_entries %}
               double J_{{ entry[0] }}_{{ entry[1] }} = {{ entry[2] }};
 {% endfor %}

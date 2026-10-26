@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.24)
-project(mkpp_host CXX C Fortran)
+project(mkpp_host LANGUAGES CXX C)
 
 # See the note in the MKPP root CMakeLists: a parent build that added MKPP via add_subdirectory
 # already provides the Kokkos targets, and re-running find_package would resolve against a different
 # installation.
 if(NOT TARGET Kokkos::kokkos)
-  find_package(Kokkos REQUIRED)
+  find_package(Kokkos 5.1.1 REQUIRED)
 endif()
 
 add_library(mkpp_host INTERFACE)

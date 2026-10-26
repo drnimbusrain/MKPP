@@ -167,7 +167,7 @@ class TestFunctionSignatureInvariance:
         expected_sig = (
             "template <class StateView> "
             "KOKKOS_INLINE_FUNCTION void integrate("
-            "double dt_total, StateView& state, const double* jvals) const"
+            "double dt_total, StateView& state, Kokkos::View<const double*, memory_space> jvals_view) const"
         )
 
         for solver_name in SOLVER_COEFFICIENTS:
@@ -184,7 +184,7 @@ class TestFunctionSignatureInvariance:
         expected_sig = (
             "template <class StateView> "
             "KOKKOS_INLINE_FUNCTION void integrate_with_reduction("
-            "double dt_total, StateView& state, const double* jvals, "
+            "double dt_total, StateView& state, Kokkos::View<const double*, memory_space> jvals_view, "
             "double importance_threshold) const"
         )
 

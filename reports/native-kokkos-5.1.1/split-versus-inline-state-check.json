@@ -1,0 +1,60 @@
+{
+  "species_sets_equal": true,
+  "bitwise_equal_json_values": true,
+  "max_symmetric_relative_difference": 0.0,
+  "max_absolute_difference": 0.0,
+  "largest_differences": [
+    {
+      "species": "soa5_a2",
+      "relative": 0.0,
+      "absolute": 0.0
+    },
+    {
+      "species": "soa5_a1",
+      "relative": 0.0,
+      "absolute": 0.0
+    },
+    {
+      "species": "soa4_a2",
+      "relative": 0.0,
+      "absolute": 0.0
+    },
+    {
+      "species": "soa4_a1",
+      "relative": 0.0,
+      "absolute": 0.0
+    },
+    {
+      "species": "soa3_a2",
+      "relative": 0.0,
+      "absolute": 0.0
+    },
+    {
+      "species": "soa3_a1",
+      "relative": 0.0,
+      "absolute": 0.0
+    },
+    {
+      "species": "soa2_a2",
+      "relative": 0.0,
+      "absolute": 0.0
+    },
+    {
+      "species": "soa2_a1",
+      "relative": 0.0,
+      "absolute": 0.0
+    },
+    {
+      "species": "soa1_a2",
+      "relative": 0.0,
+      "absolute": 0.0
+    },
+    {
+      "species": "soa1_a1",
+      "relative": 0.0,
+      "absolute": 0.0
+    }
+  ],
+  "note": "Comparison with the earlier inline O0 smoke, not a scientific reference or runtime performance acceptance test.",
+  "publication_eligible": false
+}

@@ -1,0 +1,29 @@
+{
+  "package": "musica",
+  "package_version": "0.16.5",
+  "wheel": "musica-0.16.5-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+  "wheel_sha256": "d761e911db82771e41372799d30c631d63fedbdf3c0e96309a5206beb05ee322",
+  "configuration_path": "musica/configs/v1/ts1/ts1.json",
+  "configuration_version": "1.0.0",
+  "package_configuration_sha256": "83b997e913194dd66046e7f76d54538dbed7e717f2ecb569e73d2c5f38b71732",
+  "vendored_configuration_sha256": "83b997e913194dd66046e7f76d54538dbed7e717f2ecb569e73d2c5f38b71732",
+  "csv_restored_sha256": "58db29256362fcd7fd60d47fe3d463c566dfbe14c000757202393fa7a28a9253",
+  "differences": [],
+  "resolution": "Canonical TS1 now matches the project-pinned MUSICA 0.16.5 v1 configuration byte for byte; generated bindings and trajectory admission must be refreshed.",
+  "upstream_equivalence_verified": true,
+  "previous_vendored_sha256": "f5c31297ba5e38c17e49607ed2b7bcbf194b412fe49f819c23c66548e6f532de",
+  "previous_differences": [
+    {
+      "path": "/metadata",
+      "package": null,
+      "vendored": {
+        "mkpp_mechanism_id": "ts1"
+      }
+    },
+    {
+      "path": "/phases/0/species/149/diffusion coefficient [m2 s-1]",
+      "package": 1e+300,
+      "vendored": 1e-05
+    }
+  ]
+}

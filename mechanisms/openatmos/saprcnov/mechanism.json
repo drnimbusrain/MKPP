@@ -1423,7 +1423,7 @@
       "k0_C": "0.0",
       "kinf_A": "4.0e+16",
       "kinf_B": "13600.0",
-      "kinf_C": "0.0.",
+      "kinf_C": "0.0",
       "products": [
         {
           "coefficient": 1.0,

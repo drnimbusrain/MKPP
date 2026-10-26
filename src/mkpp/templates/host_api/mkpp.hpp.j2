@@ -70,6 +70,14 @@ public:
         checkStatus(mkpp_set_state_ptrs(handle_, species_conc, temp, pressure, air_density));
     }
 
+    void setRateParameterPointers(const double* values, std::size_t count) {
+        checkStatus(mkpp_set_rate_parameter_ptrs(handle_, values, count));
+    }
+
+    void setCloudWaterPointer(const double* values) {
+        checkStatus(mkpp_set_cloud_water_ptr(handle_, values));
+    }
+
     void setPhotolysisPointers(const double* photolysis_rates) {
         checkStatus(mkpp_set_photolysis_ptrs(handle_, photolysis_rates));
     }

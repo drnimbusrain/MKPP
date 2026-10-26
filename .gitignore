@@ -18,6 +18,7 @@ compile_commands.json
 
 # Python & AOT Compiler
 __pycache__/
+.scratch/
 *.pyc
 *.pyo
 *.pyd
@@ -55,6 +56,8 @@ Thumbs.db
 *.log
 *.tmp
 *.csv
+# Pinned scientific input is source, not generated solver output.
+!benchmarks/solver_comparison/sources/ts1/musica-config/initial_conditions.csv
 *~
 *.swp
 *.swo

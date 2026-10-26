@@ -1,0 +1,5 @@
+// Generated {{ mechanism_name }} kernel definitions from the shared implementation.
+#if defined(MKPP_SEPARATE_HOST_KERNELS_{{ mechanism_name | upper }})
+#define MKPP_DEFINE_HOST_KERNELS
+#endif
+#include "factorize.hpp"

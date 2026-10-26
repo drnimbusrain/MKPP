@@ -1,0 +1,21 @@
+{
+  "command": [
+    "/workspace/scratch/c30a2a2efea9/MKPP-feature-gpu/build/native-smoke/solver_benchmark_mkpp_diagnostic",
+    "--mechanism",
+    "ts1",
+    "--cells",
+    "1",
+    "--steps",
+    "10",
+    "--dt",
+    "60",
+    "--warmups",
+    "1",
+    "--repetitions",
+    "1"
+  ],
+  "returncode": 0,
+  "wall_seconds": 28.79005781700016,
+  "optimization": "-O0 diagnostic object; Release Kokkos libraries",
+  "publication_eligible": false
+}

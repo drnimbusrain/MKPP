@@ -20,11 +20,12 @@ using ExecSpace = Kokkos::DefaultExecutionSpace;
 // ---------------------------------------------------------------------------
 struct MKPPTS1Functor {
     using ViewType = Kokkos::View<double**, Kokkos::LayoutLeft, typename ExecSpace::memory_space>;
+    using JvalsType = Kokkos::View<const double*, typename ExecSpace::memory_space>;
     ViewType m_state;
     double m_dt;
-    const double* m_jvals;
+    JvalsType m_jvals;
 
-    MKPPTS1Functor(ViewType state, double dt, const double* jvals)
+    MKPPTS1Functor(ViewType state, double dt, JvalsType jvals)
         : m_state(state), m_dt(dt), m_jvals(jvals) {}
 
     KOKKOS_INLINE_FUNCTION
@@ -39,7 +40,8 @@ struct MKPPTS1Functor {
 // Direct C++ TS1 Benchmark Entry Point
 // ---------------------------------------------------------------------------
 int main(int argc, char* argv[]) {
-    Kokkos::initialize(argc, argv);
+    // Exception-safe runtime ownership; also consumes --kokkos-* tuning args (FR-013).
+    Kokkos::ScopeGuard kokkos_scope(argc, argv);
     int exit_code = 0;
     {
         int num_cells = 1000;
@@ -129,7 +131,7 @@ int main(int argc, char* argv[]) {
 
         // 4. Warmup MKPP
         Kokkos::parallel_for("warmup", Kokkos::RangePolicy<ExecSpace>(0, num_cells),
-                             MKPPTS1Functor(mkpp_state, dt, mkpp_jvals.data()));
+                             MKPPTS1Functor(mkpp_state, dt, mkpp_jvals));
         Kokkos::fence();
 
         // Re-initialize MKPP state for benchmark
@@ -148,7 +150,7 @@ int main(int argc, char* argv[]) {
         auto start_mkpp = std::chrono::high_resolution_clock::now();
         for (int step = 0; step < num_steps; ++step) {
             Kokkos::parallel_for("step", Kokkos::RangePolicy<ExecSpace>(0, num_cells),
-                                 MKPPTS1Functor(mkpp_state, dt, mkpp_jvals.data()));
+                                 MKPPTS1Functor(mkpp_state, dt, mkpp_jvals));
         }
         Kokkos::fence();
         auto end_mkpp = std::chrono::high_resolution_clock::now();
@@ -206,6 +208,5 @@ int main(int argc, char* argv[]) {
                       << max_rel_err << " <= " << parity_threshold << ")." << std::endl;
         }
     }
-    Kokkos::finalize();
     return exit_code;
 }

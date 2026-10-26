@@ -1,15 +1,5 @@
-// Generated sparse forward/back substitution for chapman.
-namespace mkpp::generated::chapman::detail {
-void solve_lu(const double* lu, const double* rhs, double* solution) {
-  constexpr int N = 4;
-  double work[N];
-  work[0] = rhs[0];
-  work[1] = rhs[1] - lu[1 * N + 0] * work[0];
-  work[2] = rhs[2] - lu[2 * N + 0] * work[0] - lu[2 * N + 1] * work[1];
-  work[3] = rhs[3] - lu[3 * N + 0] * work[0] - lu[3 * N + 1] * work[1] - lu[3 * N + 2] * work[2];
-  solution[3] = work[3] / lu[3 * N + 3];
-  solution[2] = (work[2] - lu[2 * N + 3] * solution[3]) / lu[2 * N + 2];
-  solution[1] = (work[1] - lu[1 * N + 2] * solution[2] - lu[1 * N + 3] * solution[3]) / lu[1 * N + 1];
-  solution[0] = work[0] / lu[0 * N + 0];
-}
-}  // namespace mkpp::generated::chapman::detail
+// Generated chapman kernel definitions from the shared implementation.
+#if defined(MKPP_SEPARATE_HOST_KERNELS_CHAPMAN)
+#define MKPP_DEFINE_HOST_KERNELS
+#endif
+#include "solve.hpp"

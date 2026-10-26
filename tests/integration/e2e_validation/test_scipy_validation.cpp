@@ -181,10 +181,11 @@ ReferenceData load_reference(const std::string& path) {
 struct ScipyValidationFunctor {
     ConcentrationsView state;
     double dt;
-    const double* jvals_ptr;
+    Kokkos::View<const double*, typename ExecSpace::memory_space> jvals_view;
 
-    ScipyValidationFunctor(ConcentrationsView s, double dt_, const double* jv)
-        : state(s), dt(dt_), jvals_ptr(jv) {}
+    ScipyValidationFunctor(ConcentrationsView s, double dt_,
+                           Kokkos::View<const double*, typename ExecSpace::memory_space> jv)
+        : state(s), dt(dt_), jvals_view(jv) {}
 
     KOKKOS_INLINE_FUNCTION
     void operator()(const Kokkos::TeamPolicy<ExecSpace>::member_type& team) const {
@@ -194,7 +195,7 @@ struct ScipyValidationFunctor {
             auto cell_state = Kokkos::subview(state, i, Kokkos::ALL(), 0, 0);
 
             ChapmanSolver solver;
-            solver.integrate(dt, cell_state, jvals_ptr);
+            solver.integrate(dt, cell_state, jvals_view);
         });
     }
 };
@@ -228,8 +229,9 @@ TEST(ScipyValidation, ChapmanIntegration) {
 
     ConcentrationsView state(host_data.data(), num_cells, num_species, 1, 1);
 
-    // Prepare jvals on device-accessible memory
-    double jvals[2] = {ref.jvals[0], ref.jvals[1]};
+    // Prepare jvals in the memory space the kernels execute in
+    double jvals_data[2] = {ref.jvals[0], ref.jvals[1]};
+    Kokkos::View<const double*, typename ExecSpace::memory_space> jvals(jvals_data, 2);
 
     // Compute integration time
     double dt = ref.time_end - ref.time_start;
@@ -288,9 +290,8 @@ TEST(ScipyValidation, ChapmanIntegration) {
 }
 
 int main(int argc, char** argv) {
-    Kokkos::initialize(argc, argv);
+    // Exception-safe runtime ownership; also consumes --kokkos-* tuning args (FR-013).
+    Kokkos::ScopeGuard kokkos_scope(argc, argv);
     ::testing::InitGoogleTest(&argc, argv);
-    int result = RUN_ALL_TESTS();
-    Kokkos::finalize();
-    return result;
+    return RUN_ALL_TESTS();
 }

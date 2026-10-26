@@ -1,0 +1,62 @@
+{
+  "kokkos": "5.1.1",
+  "backend": "Serial CPU",
+  "publication_eligible": false,
+  "runs": [
+    {
+      "case": "MKPP Chapman production API",
+      "binary_sha256": "ab36c960fd5d0dd00a49ee4ae8b1ffa3229d2b082150b4e107bb9fd66793a219",
+      "optimization": "-O3",
+      "reported_status": "finite-state API smoke",
+      "final_time_seconds": 600,
+      "species_count": 4,
+      "all_finite": true,
+      "publication_eligible": false,
+      "stdout": "mkpp-chapman-api.stdout.json"
+    },
+    {
+      "case": "MKPP Chapman governed runner",
+      "binary_sha256": "608f520faa23949a9ad4c6df4e468085274153cbb7679227b6736651ebf7fcc2",
+      "optimization": "-O0",
+      "reported_status": "success",
+      "final_time_seconds": 600,
+      "species_count": 4,
+      "all_finite": true,
+      "publication_eligible": false,
+      "stdout": "mkpp-chapman-diagnostic.stdout.json"
+    },
+    {
+      "case": "MKPP TS1 governed runner",
+      "binary_sha256": "608f520faa23949a9ad4c6df4e468085274153cbb7679227b6736651ebf7fcc2",
+      "optimization": "-O0",
+      "reported_status": "success",
+      "final_time_seconds": 600,
+      "species_count": 210,
+      "all_finite": true,
+      "publication_eligible": false,
+      "stdout": "mkpp-ts1-diagnostic.stdout.json"
+    },
+    {
+      "case": "MICM Chapman",
+      "binary_sha256": "069996e04b4ff1312b1b6652c782442f28d9430e8c7d8bf3018b6b2d70a46523",
+      "optimization": "-O3",
+      "reported_status": "success",
+      "final_time_seconds": 600,
+      "species_count": 4,
+      "all_finite": true,
+      "publication_eligible": false,
+      "stdout": "micm-chapman.stdout.json"
+    },
+    {
+      "case": "MICM TS1",
+      "binary_sha256": "9ffb9eaecef7c169db98fe9c649f40781876c1f47b3bff859488c33d39c4da86",
+      "optimization": "-O3",
+      "reported_status": "success",
+      "final_time_seconds": 600,
+      "species_count": 210,
+      "all_finite": true,
+      "publication_eligible": false,
+      "stdout": "micm-ts1.stdout.json"
+    }
+  ]
+}

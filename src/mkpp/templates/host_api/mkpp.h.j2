@@ -27,6 +27,7 @@ extern "C" {
 typedef struct mkpp_handle_s* mkpp_handle_t;
 
 /* Mechanism Static Metadata Constants */
+#define MKPP_NUM_RATE_PARAMETERS {{ num_runtime_parameters }}
 #define MKPP_NUM_SPECIES   {{ num_species }}
 #define MKPP_NUM_REACTIONS {{ num_reactions }}
 #define MKPP_NUM_PHOTOLYSIS {{ num_photolysis | default(0) }}
@@ -50,7 +51,12 @@ int mkpp_set_state_ptrs(mkpp_handle_t handle,
                         const double* pressure,
                         const double* air_density);
 
+/* LayoutLeft: values[cell + num_cells * parameter], count parameters per cell. */
+int mkpp_set_rate_parameter_ptrs(mkpp_handle_t handle, const double* values, size_t count);
+
 int mkpp_set_photolysis_ptrs(mkpp_handle_t handle, const double* photolysis_rates);
+
+int mkpp_set_cloud_water_ptr(mkpp_handle_t handle, const double* values);
 
 int mkpp_set_aerosol_ptrs(mkpp_handle_t handle,
                          const double* relative_humidity,
@@ -58,6 +64,7 @@ int mkpp_set_aerosol_ptrs(mkpp_handle_t handle,
 
 /* Solver Computation Entry Points */
 int mkpp_integrate(mkpp_handle_t handle, double dt);
+/* Species time derivatives: num_cells x MKPP_NUM_SPECIES, LayoutLeft. */
 int mkpp_evaluate_rates(mkpp_handle_t handle, double* rates_out);
 int mkpp_evaluate_jacobian(mkpp_handle_t handle, double* jac_out);
 

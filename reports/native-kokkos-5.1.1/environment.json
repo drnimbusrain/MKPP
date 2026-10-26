@@ -1,0 +1,26 @@
+{
+  "compiler": "c++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0",
+  "kokkos_version": "5.1.1",
+  "kokkos_commit": "267ebc25fc5c8b96bb321f34d78f97b1c30f8830",
+  "micm_commit": "97ac9e5d8aadd345c242722ee8274d71dfe0f73e",
+  "backend": "Kokkos Serial CPU",
+  "precision": "binary64",
+  "build_type": "Release",
+  "platform": "Linux-6.18.55-x86_64-with-glibc2.39",
+  "logical_cpu_count_reported": 9,
+  "affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "gpu_tested": false,
+  "physical_core_binding_verified": false,
+  "clock_resolution_seconds": 1e-09,
+  "publication_eligible": false
+}

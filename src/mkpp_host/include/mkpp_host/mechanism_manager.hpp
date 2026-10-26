@@ -4,6 +4,10 @@
 #include "dispatcher.hpp"
 #include "mechanisms.hpp"
 
+#ifdef MKPP_HAS_KOKKOS_KERNELS
+#include "batched_dense_solver.hpp"
+#endif
+
 #include <iostream>
 #include <map>
 #include <memory>
@@ -203,6 +207,59 @@ public:
         std::cerr << err << std::endl;
         throw std::runtime_error(err);
     }
+
+#ifdef MKPP_HAS_KOKKOS_KERNELS
+    /// @brief Production dispatch entry for the team+vector batched dense solve (FR-008).
+    ///
+    /// Solves `num_cells` independent N x N dense systems in one launch, using
+    /// `KokkosBatched::TeamLU` (team layer) and `TeamVectorTrsv` (team+vector layers) so the
+    /// vector lanes are engaged instead of pinning one matrix per thread. This is the wired-in
+    /// production path for `batched_dense_solve`; the matrices are exactly the `(cells,species,
+    /// species)` LayoutLeft Jacobian batch that `mkpp_evaluate_jacobian` produces, so the same
+    /// team+vector solve serves the C-ABI and any host caller. Gated behind KokkosKernels: with
+    /// the batched backend disabled there is no batched production path to exercise (E6 `enabled`).
+    ///
+    /// @tparam MatrixView 3D view [num_cells, N, N] in the default execution space.
+    /// @tparam VectorView 2D view [num_cells, N] in the default execution space.
+    /// @param A Batched system matrices (overwritten in place with LU factors).
+    /// @param b Batched right-hand sides (overwritten in place with the solution x).
+    /// @param error_status Per-cell status buffer (size num_cells).
+    /// @param team_size Cells handled cooperatively per team; clamped to the batch size.
+    template <typename MatrixView, typename VectorView>
+    static void batched_dense_solve(
+        const MatrixView& A,
+        const VectorView& b,
+        BatchErrorStatus<> error_status,
+        int team_size = 64) {
+        using ExecSpace = Kokkos::DefaultExecutionSpace;
+        using TeamPolicy = Kokkos::TeamPolicy<ExecSpace>;
+
+        const int num_cells = static_cast<int>(A.extent(0));
+        if (num_cells == 0) {
+            return;
+        }
+        if (static_cast<int>(error_status.status.extent(0)) < num_cells) {
+            std::string err = "FATAL ERROR: batched_dense_solve error buffer (" +
+                              std::to_string(error_status.status.extent(0)) + ") smaller than batch (" +
+                              std::to_string(num_cells) + ").";
+            std::cerr << err << std::endl;
+            throw std::runtime_error(err);
+        }
+
+        const int team_count = (num_cells + team_size - 1) / team_size;
+        TeamPolicy policy(team_count, Kokkos::AUTO);
+
+        // Qualify with mkpp::host:: so this resolves to the free solver function rather than
+        // recursing into the member function we are defining.
+        Kokkos::parallel_for(
+            "MKPP_Batched_Dense_Solve_Dispatch",
+            policy,
+            KOKKOS_LAMBDA(const typename TeamPolicy::member_type& member) {
+                mkpp::host::batched_dense_solve(member, A, b, error_status);
+            });
+        Kokkos::fence();
+    }
+#endif
 };
 
 } // namespace host

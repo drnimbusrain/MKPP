@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
+from itertools import permutations
 from pathlib import Path
 
 from mkpp.benchmark.sampling import (
@@ -18,11 +20,11 @@ from mkpp.benchmark.sampling import (
 def test_seeded_balanced_order_is_repeatable_and_interleaved() -> None:
     first = balanced_order(("micm", "mkpp", "kpp"), blocks=6, seed=17)
     assert first == balanced_order(("micm", "mkpp", "kpp"), blocks=6, seed=17)
-    assert {order for order in first} == {
-        ("micm", "mkpp", "kpp"),
-        ("mkpp", "kpp", "micm"),
-        ("kpp", "micm", "mkpp"),
-    }
+    assert set(first) == set(permutations(("micm", "mkpp", "kpp")))
+    for position in range(3):
+        assert set(Counter(order[position] for order in first).values()) == {2}
+    predecessors = Counter(pair for order in first for pair in zip(order, order[1:]))
+    assert set(predecessors.values()) == {2}
 
 
 def test_pilot_doubles_common_work_until_three_run_median_is_long_enough() -> None:
@@ -57,3 +59,26 @@ def test_raw_records_are_append_only_jsonl(tmp_path: Path) -> None:
     append_raw_record(path, {"run": 1})
     append_raw_record(path, {"run": 2})
     assert [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] == [{"run": 1}, {"run": 2}]
+
+
+def test_paired_pilot_rechecks_every_solver_at_the_final_common_count():
+    from mkpp.benchmark.sampling import paired_repetition_count
+
+    calls = []
+
+    def measure(count):
+        calls.append(count)
+        # B passes at count 1 but changes at count 2, so max(independent
+        # pilots) would incorrectly choose 2 after A's pilot succeeds.
+        return {"A": (count / 2,) * 3, "B": ((0.2 if count == 2 else count),) * 3}
+
+    assert paired_repetition_count(measure, maximum=8) == 4
+    assert calls == [1, 2, 4]
+
+
+def test_paired_pilot_rejects_missing_or_changed_subjects():
+    import pytest
+    from mkpp.benchmark.sampling import paired_repetition_count
+
+    with pytest.raises(ValueError, match="subject identities"):
+        paired_repetition_count(lambda count: {"A": (0.1,) * 3} if count == 1 else {"B": (1.0,) * 3})

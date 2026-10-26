@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
+import math
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from mkpp.benchmark.models import SolverRun
 from mkpp.benchmark.statistics import paired_ratio_summary
 
 _TS1_SOLVERS = {"micm", "mkpp"}
@@ -59,6 +63,9 @@ def derive_pairwise_comparison(
         "candidate_solver_id": candidate_solver_id,
         "ratio_direction": direction,
     }
+    if eligible and (len(baseline_seconds) < 10 or len(candidate_seconds) < 10):
+        eligible = False
+        withheld_reason = "at least 10 valid paired blocks are required"
     if not eligible:
         result.update(
             status="withheld",
@@ -75,6 +82,51 @@ def derive_pairwise_comparison(
         paired_raw_ratios=summary.raw_ratios,
     )
     return result
+
+
+def derive_verified_comparison(
+    baseline_runs: tuple[SolverRun, ...],
+    candidate_runs: tuple[SolverRun, ...],
+    *,
+    scientific_eligible: bool,
+    seed: int,
+    primary_cpu: bool = True,
+    minimum_valid_blocks: int = 10,
+    minimum_sample_seconds: float = 1.0,
+) -> dict[str, Any]:
+    """Check retained pairing; orchestration must supply completed science gates.
+
+    The caller passes campaign-specific floors. This helper does not establish
+    native warmup stability, timer overhead, or independent scientific evidence.
+    """
+    # Local import avoids the orchestration/report dependency during module load.
+    from mkpp.benchmark.orchestrator import require_comparable_pairs
+
+    reason = None if scientific_eligible else "scientific eligibility failed"
+    if type(minimum_valid_blocks) is not int or minimum_valid_blocks < 10:
+        raise ValueError("minimum_valid_blocks must be an integer >= 10")
+    if not math.isfinite(minimum_sample_seconds) or minimum_sample_seconds < 1.0:
+        raise ValueError("minimum_sample_seconds must be finite and >= 1")
+    try:
+        blocks = require_comparable_pairs(
+            baseline_runs, candidate_runs, primary_cpu=primary_cpu, minimum_blocks=minimum_valid_blocks
+        )
+        if any(run.elapsed_seconds < minimum_sample_seconds for run in (*baseline_runs, *candidate_runs)):
+            raise ValueError("retained measurement is shorter than the campaign sample duration floor")
+    except ValueError as error:
+        blocks = ()
+        reason = str(error)
+    baseline = {run.block_id: run for run in baseline_runs}
+    candidate = {run.block_id: run for run in candidate_runs}
+    return derive_pairwise_comparison(
+        baseline_solver_id=baseline_runs[0].solver_id.value if baseline_runs else "unknown",
+        candidate_solver_id=candidate_runs[0].solver_id.value if candidate_runs else "unknown",
+        baseline_seconds=tuple(baseline[block].elapsed_seconds for block in blocks),
+        candidate_seconds=tuple(candidate[block].elapsed_seconds for block in blocks),
+        eligible=reason is None,
+        seed=seed,
+        withheld_reason=reason,
+    )
 
 
 def render_markdown_report(document: Mapping[str, Any]) -> str:
@@ -97,7 +149,10 @@ def render_markdown_report(document: Mapping[str, Any]) -> str:
                 raise ValueError(f"{key} comparison must be an object")
             direction = comparison.get("ratio_direction", "ratio direction unavailable")
             if comparison.get("status") == "eligible":
-                lines.append(f"- `{direction}`: {comparison.get('median_ratio')}")
+                lines.append(
+                    f"- `{direction}`: {comparison.get('median_ratio')}; "
+                    f"95% bootstrap interval: {comparison.get('bootstrap_interval', 'unavailable')}"
+                )
             else:
                 lines.append(f"- Withheld `{direction}`: {comparison.get('withheld_reason', 'ineligible')}")
     return "\n".join(lines) + "\n"
@@ -126,7 +181,9 @@ def render_csv_report(document: Mapping[str, Any]) -> str:
         "admission_status",
         "admission_reason",
     )
-    rows = [",".join(columns)]
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow(columns)
     mechanism_id = str(document.get("mechanism_id", "unknown"))
     admission_status = str(document.get("admission_status", "unknown"))
     admission_reason = str(document.get("admission_reason", ""))
@@ -151,8 +208,8 @@ def render_csv_report(document: Mapping[str, Any]) -> str:
                 admission_status,
                 admission_reason,
             )
-            rows.append(",".join(json.dumps(value, ensure_ascii=False) for value in values))
-    return "\n".join(rows) + "\n"
+            writer.writerow(values)
+    return output.getvalue()
 
 
 def validate_ts1_report(document: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -199,6 +256,7 @@ def validate_ts1_report(document: Mapping[str, Any]) -> Mapping[str, Any]:
 
 __all__ = [
     "derive_pairwise_comparison",
+    "derive_verified_comparison",
     "read_raw_results",
     "render_csv_report",
     "render_json_report",

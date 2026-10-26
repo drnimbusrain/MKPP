@@ -1,0 +1,68 @@
+{
+  "publication_eligible": false,
+  "scientific_accuracy_gate_passed": false,
+  "note": "Uncalibrated comparison of O0 MKPP and O3 MICM final states; no tolerance acceptance asserted.",
+  "species_sets_equal": true,
+  "largest_symmetric_relative_discrepancies": [
+    {
+      "species": "sink",
+      "difference": 0.9938875913134224,
+      "mkpp": 1.006149999999997e-30,
+      "micm": 6.1499999999999884e-33
+    },
+    {
+      "species": "HBR",
+      "difference": 6.587973116711932e-08,
+      "mkpp": 3.0623073557446724e-11,
+      "micm": 3.062307557488671e-11
+    },
+    {
+      "species": "PHENO",
+      "difference": 6.152063921668495e-08,
+      "mkpp": 1.1865337065210672e-12,
+      "micm": 1.1865337795173837e-12
+    },
+    {
+      "species": "BRO",
+      "difference": 2.8148849605477406e-08,
+      "mkpp": 2.7411677458109277e-10,
+      "micm": 2.741167668650209e-10
+    },
+    {
+      "species": "COFCL",
+      "difference": 2.7223796155755906e-08,
+      "mkpp": 8.688208974578051e-31,
+      "micm": 8.688209246816013e-31
+    },
+    {
+      "species": "BRONO2",
+      "difference": 2.5907572651489186e-08,
+      "mkpp": 3.0580653202818243e-14,
+      "micm": 3.058065241054775e-14
+    },
+    {
+      "species": "H",
+      "difference": 2.280354644772514e-08,
+      "mkpp": 2.223878667460982e-06,
+      "micm": 2.2238787181733035e-06
+    },
+    {
+      "species": "BR",
+      "difference": 2.1108532719573064e-08,
+      "mkpp": 3.196877409395039e-10,
+      "micm": 3.196877476876432e-10
+    },
+    {
+      "species": "HO2NO2",
+      "difference": 2.0530543422929606e-08,
+      "mkpp": 4.9003114167134505e-08,
+      "micm": 4.900311517319509e-08
+    },
+    {
+      "species": "SO3",
+      "difference": 1.8247791401363884e-08,
+      "mkpp": 7.089445970504701e-21,
+      "micm": 7.089446099871435e-21
+    }
+  ]
+}

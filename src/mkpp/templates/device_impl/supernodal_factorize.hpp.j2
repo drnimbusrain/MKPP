@@ -1,0 +1,32 @@
+{# Ordered sparse Doolittle plan, with compact numeric buffers. #}
+#pragma once
+#include <Kokkos_Core.hpp>
+namespace mkpp::generated::{{ mechanism_name }}::detail {
+#if defined(MKPP_DEFINE_HOST_KERNELS)
+void
+#else
+KOKKOS_INLINE_FUNCTION void
+#endif
+factorize_plan(const double* w, double* lu) {
+  struct Operation { int output, input, begin, end, diagonal; };
+  struct Product { int left, right; };
+  static constexpr Operation operations[] = {
+{% for op in compact.operations %}
+    { {{ op.output }}, {{ op.w }}, {{ op.begin }}, {{ op.end }}, {{ op.diagonal }} },
+{% endfor %}
+  };
+  static constexpr Product products[] = {
+{% for pair in compact.products %}
+    { {{ pair[0] }}, {{ pair[1] }} },
+{% else %}
+    { 0, 0 },
+{% endfor %}
+  };
+  for (const auto& op : operations) {
+    double value = op.input >= 0 ? w[op.input] : 0.0;
+    for (int product = op.begin; product < op.end; ++product)
+      value -= lu[products[product].left] * lu[products[product].right];
+    lu[op.output] = op.diagonal >= 0 ? value / lu[op.diagonal] : value;
+  }
+}
+}  // namespace mkpp::generated::{{ mechanism_name }}::detail

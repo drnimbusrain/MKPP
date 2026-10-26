@@ -1,7 +1,7 @@
 environment:
   # These are the ENV values from the pinned TS1 initial_conditions.csv.
-  # MKPP compiles Arrhenius expressions at this fixed reference state so the
-  # generated rate constants match MICM's Conditions for this benchmark.
+  # This reference case supplies the same runtime environment to MKPP and MICM.
+  # Generated defaults also use these values; atmospheric hosts provide cell drivers.
   temperature: 287.45
   pressure: 101319.9
   air_density: 42.393400541636808

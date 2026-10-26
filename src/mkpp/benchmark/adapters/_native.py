@@ -130,7 +130,6 @@ def _decode_solver_run(result: dict[str, Any], request: AdapterRunRequest) -> So
         (
             result["manifest"]["sha256"],
             result["scenario"]["sha256"],
-            result["configuration"]["sha256"],
             timing["boundary"],
         )
     ).encode()

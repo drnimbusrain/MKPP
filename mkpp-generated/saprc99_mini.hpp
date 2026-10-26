@@ -1,5 +1,17 @@
 #pragma once
 #include <Kokkos_Core.hpp>
+// CPU libraries can own the heavy helper definitions. Device builds keep the
+// complete device-callable implementation visible without relocatable device code.
+#if defined(MKPP_SEPARATE_HOST_KERNELS_SAPRC99_MINI)
+#include "saprc99_mini/host_declarations.hpp"
+#else
+#include "saprc99_mini/accessor.hpp"
+#include "saprc99_mini/rates.hpp"
+#include "saprc99_mini/jacobian.hpp"
+#include "saprc99_mini/supernodal_factorize.hpp"
+#include "saprc99_mini/supernodal_solve.hpp"
+#include "saprc99_mini/solve.hpp"
+#endif
 // Generated solver for saprc99_mini
 // SZA Workload Sorted: true
 // Hysteresis/Spline Continuous Transition: true
@@ -29,6 +41,14 @@ namespace mkpp::generated::saprc99_mini {
       N2 = 16
   };
 
+
+  // Equilibrium meteorological input indices
+  enum class EquilibriumInput : int {
+      Temperature = 0,
+      RelativeHumidity = 1,
+      COUNT = 2
+  };
+
 #ifdef MKPP_ENABLE_ADJOINT
   // Checkpoint buffer for discrete adjoint/TLM integration
   // Recompute-J strategy: only state is stored, Jacobian recomputed from saved state
@@ -42,20 +62,22 @@ namespace mkpp::generated::saprc99_mini {
 #endif
 
   // The expression-dense RHS and Jacobian are compiled in bounded units.
-  // This declaration-only boundary keeps host-model translation units small.
-  namespace detail {
-  void compute_rates_chunk_0(const double* state, double* rates,
-                                              const double* jvals, double temp, double rh);
-  void compute_jacobian_chunk_0(const double* state, double* jacobian,
-                                                 const double* jvals, double temp, double rh);
-  void factorize_lu_chunk_0(const double* w, double* lu);
-  void solve_lu(const double* lu, const double* rhs, double* solution);
-  void factorize_plan(const double* w, double* lu);
-  void solve_plan(const double* lu, const double* rhs, double* solution);
-  }  // namespace detail
+  // Every detail:: helper is an inline device-callable definition supplied by
+  // the implementation fragments included at the top of this header, so a
+  // device instantiation of SolverKernels resolves the full call chain without
+  // any host-only out-of-line symbol.
 
   template<typename DeviceType>
   struct SolverKernels {
+      using memory_space = typename DeviceType::memory_space;
+      static constexpr bool SUPPORTS_RUNTIME_ENVIRONMENT = true;
+      static constexpr int NUM_RUNTIME_PARAMETERS = 4;
+      static constexpr bool HAS_CLOUD_GATED = false;
+#ifdef MKPP_ENABLE_ADJOINT
+      // Expose the checkpoint buffer through the kernel type so generic
+      // device-path callers can name it without the mechanism namespace.
+      using CheckpointBuffer = ::mkpp::generated::saprc99_mini::CheckpointBuffer;
+#endif
       /**
        * @brief Evaluates the rate-of-change vector F(i) = dC_i / dt.
        *
@@ -66,8 +88,11 @@ namespace mkpp::generated::saprc99_mini {
        * @param jvals Array of photolysis rate constants [NUM_PHOTOLYSIS].
        */
       template <class StateView, class RateView>
-      KOKKOS_INLINE_FUNCTION void compute_rates(const StateView& state, RateView& F_block, const double* jvals) const {
-          detail::compute_rates_chunk_0(state.data(), F_block.data(), jvals, 0.0, 0.0);
+      KOKKOS_INLINE_FUNCTION void compute_rates(const StateView& state, RateView& F_block, Kokkos::View<const double*, memory_space> jvals_view, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const {
+          const double* jvals = jvals_view.data();
+              const auto state_accessor = detail::make_stride_view(state);
+              const auto rates_accessor = detail::make_stride_view(F_block);
+              detail::compute_rates_chunk_0(state_accessor, rates_accessor, jvals, temp, rh, air_density);
       }
 
       /**
@@ -80,64 +105,72 @@ namespace mkpp::generated::saprc99_mini {
        * @param jvals Array of photolysis rate constants [NUM_PHOTOLYSIS].
        */
       template <class StateView, class JacView>
-      KOKKOS_INLINE_FUNCTION void compute_jacobian(const StateView& state, JacView& J_block, const double* jvals) const {
-          detail::compute_jacobian_chunk_0(state.data(), J_block.data(), jvals, 0.0, 0.0);
+      KOKKOS_INLINE_FUNCTION void compute_jacobian(const StateView& state, JacView& J_block, Kokkos::View<const double*, memory_space> jvals_view, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const {
+          const double* jvals = jvals_view.data();
+              const auto state_accessor = detail::make_stride_view(state);
+              const auto jacobian_accessor = detail::make_stride_view(J_block);
+              detail::compute_jacobian_chunk_0(state_accessor, jacobian_accessor, jvals, temp, rh, air_density);
       }
 
 #ifdef MKPP_ENABLE_ADJOINT
       template <class StateView, class JacView>
-      KOKKOS_INLINE_FUNCTION void compute_adjoint(const StateView& state, JacView& J_adj_block, const double* jvals) const {
+      KOKKOS_INLINE_FUNCTION void compute_adjoint(const StateView& state, JacView& J_adj_block, Kokkos::View<const double*, memory_space> jvals_view, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const {
+          const double* jvals = jvals_view.data();
+          const double Temp = temp;
+          const double RH = rh;
+          const double AirDensity = air_density;
+          (void)RH;  // Reserved for future deliquescence modeling
           // --- Sparse Analytical Adjoint Jacobian Entries J_adj_block(i, j) = J^T(i, j) ---
           // J^T(O3, O3): d(d[O3]/dt) / d[O3]
-          J_adj_block(0, 0) = -1.8183951663749815e-14*state(2) - 3.5338644420317084e-17*state(3) - 7.98786060795232e-15*state(9);
+          J_adj_block(0, 0) = -1.8e-12*state(2)*Kokkos::exp(-1370.0/Temp) - 1.4e-13*state(3)*Kokkos::exp(-2470.0/Temp) - 8e-12*state(9)*Kokkos::exp(-2060.0/Temp);
           // J^T(O3, NO): d(d[NO]/dt) / d[O3]
-          J_adj_block(0, 2) = -1.8183951663749815e-14*state(2);
+          J_adj_block(0, 2) = -1.8e-12*state(2)*Kokkos::exp(-1370.0/Temp);
           // J^T(O3, NO2): d(d[NO2]/dt) / d[O3]
-          J_adj_block(0, 3) = 1.8183951663749815e-14*state(2) - 3.5338644420317084e-17*state(3);
+          J_adj_block(0, 3) = 1.8e-12*state(2)*Kokkos::exp(-1370.0/Temp) - 1.4e-13*state(3)*Kokkos::exp(-2470.0/Temp);
           // J^T(O3, NO3): d(d[NO3]/dt) / d[O3]
-          J_adj_block(0, 4) = 3.5338644420317084e-17*state(3);
+          J_adj_block(0, 4) = 1.4e-13*state(3)*Kokkos::exp(-2470.0/Temp);
           // J^T(O3, O3P): d(d[O3P]/dt) / d[O3]
-          J_adj_block(0, 9) = -7.98786060795232e-15*state(9);
+          J_adj_block(0, 9) = -8e-12*state(9)*Kokkos::exp(-2060.0/Temp);
           // J^T(O3, O2): d(d[O2]/dt) / d[O3]
-          J_adj_block(0, 13) = 1.597572121590464e-14*state(9);
+          J_adj_block(0, 13) = 1.6e-11*state(9)*Kokkos::exp(-2060.0/Temp);
           // J^T(H2O2, H2O2): d(d[H2O2]/dt) / d[H2O2]
           J_adj_block(1, 1) = -1.0*jvals[3];
           // J^T(H2O2, OH): d(d[OH]/dt) / d[H2O2]
           J_adj_block(1, 10) = 2.0*jvals[3];
           // J^T(NO, O3): d(d[O3]/dt) / d[NO]
-          J_adj_block(2, 0) = -1.8183951663749815e-14*state(0);
+          J_adj_block(2, 0) = -1.8e-12*state(0)*Kokkos::exp(-1370.0/Temp);
           // J^T(NO, NO): d(d[NO]/dt) / d[NO]
-          J_adj_block(2, 2) = -2.6031661982774907e-11*state(4) - 1.8183951663749815e-14*state(0);
+          J_adj_block(2, 2) = -1.8e-11*state(4)*Kokkos::exp(110.0/Temp) - 1.8e-12*state(0)*Kokkos::exp(-1370.0/Temp);
           // J^T(NO, NO2): d(d[NO2]/dt) / d[NO]
-          J_adj_block(2, 3) = 5.206332396554981e-11*state(4) + 1.8183951663749815e-14*state(0);
+          J_adj_block(2, 3) = 3.6e-11*state(4)*Kokkos::exp(110.0/Temp) + 1.8e-12*state(0)*Kokkos::exp(-1370.0/Temp);
           // J^T(NO, NO3): d(d[NO3]/dt) / d[NO]
-          J_adj_block(2, 4) = -2.6031661982774907e-11*state(4);
+          J_adj_block(2, 4) = -1.8e-11*state(4)*Kokkos::exp(110.0/Temp);
           // J^T(NO2, O3): d(d[O3]/dt) / d[NO2]
-          J_adj_block(3, 0) = -3.5338644420317084e-17*state(0);
+          J_adj_block(3, 0) = -1.4e-13*state(0)*Kokkos::exp(-2470.0/Temp);
           // J^T(NO2, NO): d(d[NO]/dt) / d[NO2]
           J_adj_block(3, 2) = 1.0*jvals[0];
           // J^T(NO2, NO2): d(d[NO2]/dt) / d[NO2]
-          J_adj_block(3, 3) = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(4)/(1.4174820557114162e-18*state(12) + 1.0) - 3.5338644420317084e-17*state(0) - 1.0*jvals[0];
+          J_adj_block(3, 3) = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(4)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0) - 1.4e-13*state(0)*Kokkos::exp(-2470.0/Temp) - 1.0*jvals[0];
           // J^T(NO2, NO3): d(d[NO3]/dt) / d[NO2]
-          J_adj_block(3, 4) = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(4)/(1.4174820557114162e-18*state(12) + 1.0) + 3.5338644420317084e-17*state(0);
+          J_adj_block(3, 4) = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(4)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0) + 1.4e-13*state(0)*Kokkos::exp(-2470.0/Temp);
           // J^T(NO2, N2O5): d(d[N2O5]/dt) / d[NO2]
-          J_adj_block(3, 5) = 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(4)/(1.4174820557114162e-18*state(12) + 1.0);
+          J_adj_block(3, 5) = 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(4)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0);
           // J^T(NO2, O3P): d(d[O3P]/dt) / d[NO2]
           J_adj_block(3, 9) = 1.0*jvals[0];
           // J^T(NO3, NO): d(d[NO]/dt) / d[NO3]
-          J_adj_block(4, 2) = -2.6031661982774907e-11*state(2);
+          J_adj_block(4, 2) = -1.8e-11*state(2)*Kokkos::exp(110.0/Temp);
           // J^T(NO3, NO2): d(d[NO2]/dt) / d[NO3]
-          J_adj_block(4, 3) = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(3)/(1.4174820557114162e-18*state(12) + 1.0) + 5.206332396554981e-11*state(2);
+          J_adj_block(4, 3) = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(3)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0) + 3.6e-11*state(2)*Kokkos::exp(110.0/Temp);
           // J^T(NO3, NO3): d(d[NO3]/dt) / d[NO3]
-          J_adj_block(4, 4) = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(3)/(1.4174820557114162e-18*state(12) + 1.0) - 2.6031661982774907e-11*state(2);
+          J_adj_block(4, 4) = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(3)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0) - 1.8e-11*state(2)*Kokkos::exp(110.0/Temp);
           // J^T(NO3, N2O5): d(d[N2O5]/dt) / d[NO3]
-          J_adj_block(4, 5) = 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(3)/(1.4174820557114162e-18*state(12) + 1.0);
+          J_adj_block(4, 5) = 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(3)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0);
           // J^T(N2O5, NO2): d(d[NO2]/dt) / d[N2O5]
-          J_adj_block(5, 3) = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)/(7.709507080111506e-19*state(12) + 1.0);
+          J_adj_block(5, 3) = 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
           // J^T(N2O5, NO3): d(d[NO3]/dt) / d[N2O5]
-          J_adj_block(5, 4) = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)/(7.709507080111506e-19*state(12) + 1.0);
+          J_adj_block(5, 4) = 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
           // J^T(N2O5, N2O5): d(d[N2O5]/dt) / d[N2O5]
-          J_adj_block(5, 5) = -10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)/(7.709507080111506e-19*state(12) + 1.0);
+          J_adj_block(5, 5) = -2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
           // J^T(HONO, NO): d(d[NO]/dt) / d[HONO]
           J_adj_block(6, 2) = 1.0*jvals[1];
           // J^T(HONO, HONO): d(d[HONO]/dt) / d[HONO]
@@ -147,129 +180,134 @@ namespace mkpp::generated::saprc99_mini {
           // J^T(HNO3, NO2): d(d[NO2]/dt) / d[HNO3]
           J_adj_block(7, 3) = 1.0*jvals[2];
           // J^T(HNO3, NO3): d(d[NO3]/dt) / d[HNO3]
-          J_adj_block(7, 4) = 1.0*state(10)*(2.161777301914759e-32*state(12)/(4.2119062982869013e-19*state(12) + 1.0) + 1.0018153870816924e-13);
+          J_adj_block(7, 4) = 1.0*state(10)*(1.9e-33*state(12)*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
           // J^T(HNO3, HNO3): d(d[HNO3]/dt) / d[HNO3]
-          J_adj_block(7, 7) = -1.0*state(10)*(2.161777301914759e-32*state(12)/(4.2119062982869013e-19*state(12) + 1.0) + 1.0018153870816924e-13) - 1.0*jvals[2];
+          J_adj_block(7, 7) = -1.0*state(10)*(1.9e-33*state(12)*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) - 1.0*jvals[2];
           // J^T(HNO3, OH): d(d[OH]/dt) / d[HNO3]
-          J_adj_block(7, 10) = -1.0*state(10)*(2.161777301914759e-32*state(12)/(4.2119062982869013e-19*state(12) + 1.0) + 1.0018153870816924e-13) + 1.0*jvals[2];
+          J_adj_block(7, 10) = -1.0*state(10)*(1.9e-33*state(12)*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) + 1.0*jvals[2];
           // J^T(O3P, O3): d(d[O3]/dt) / d[O3P]
-          J_adj_block(9, 0) = 5.779235214948339e-34*state(12)*state(13) - 7.98786060795232e-15*state(0);
+          J_adj_block(9, 0) = 4.9010355073085e-27*state(12)*state(13)*Kokkos::pow(Temp, -2.8) - 8e-12*state(0)*Kokkos::exp(-2060.0/Temp);
           // J^T(O3P, O3P): d(d[O3P]/dt) / d[O3P]
-          J_adj_block(9, 9) = -5.779235214948339e-34*state(12)*state(13) - 7.98786060795232e-15*state(0);
+          J_adj_block(9, 9) = -4.9010355073085e-27*state(12)*state(13)*Kokkos::pow(Temp, -2.8) - 8e-12*state(0)*Kokkos::exp(-2060.0/Temp);
           // J^T(O3P, O2): d(d[O2]/dt) / d[O3P]
-          J_adj_block(9, 13) = -5.779235214948339e-34*state(12)*state(13) + 1.597572121590464e-14*state(0);
+          J_adj_block(9, 13) = -4.9010355073085e-27*state(12)*state(13)*Kokkos::pow(Temp, -2.8) + 1.6e-11*state(0)*Kokkos::exp(-2060.0/Temp);
           // J^T(OH, NO3): d(d[NO3]/dt) / d[OH]
-          J_adj_block(10, 4) = 1.0*state(7)*(2.161777301914759e-32*state(12)/(4.2119062982869013e-19*state(12) + 1.0) + 1.0018153870816924e-13);
+          J_adj_block(10, 4) = 1.0*state(7)*(1.9e-33*state(12)*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
           // J^T(OH, HNO3): d(d[HNO3]/dt) / d[OH]
-          J_adj_block(10, 7) = -1.0*state(7)*(2.161777301914759e-32*state(12)/(4.2119062982869013e-19*state(12) + 1.0) + 1.0018153870816924e-13);
+          J_adj_block(10, 7) = -1.0*state(7)*(1.9e-33*state(12)*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
           // J^T(OH, OH): d(d[OH]/dt) / d[OH]
-          J_adj_block(10, 10) = -1.0*state(7)*(2.161777301914759e-32*state(12)/(4.2119062982869013e-19*state(12) + 1.0) + 1.0018153870816924e-13);
+          J_adj_block(10, 10) = -1.0*state(7)*(1.9e-33*state(12)*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
           // J^T(HO2, H2O2): d(d[H2O2]/dt) / d[HO2]
-          J_adj_block(11, 1) = 4.864965347266905e-32*state(12) + 1.7207046561730112e-12;
+          J_adj_block(11, 1) = 1.7e-33*state(12)*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp);
           // J^T(HO2, HO2): d(d[HO2]/dt) / d[HO2]
-          J_adj_block(11, 11) = -4.864965347266905e-32*state(12) - 1.7207046561730112e-12;
+          J_adj_block(11, 11) = -1.7e-33*state(12)*Kokkos::exp(1000.0/Temp) - 2.3e-13*Kokkos::exp(600.0/Temp);
           // J^T(HO2, O2): d(d[O2]/dt) / d[HO2]
-          J_adj_block(11, 13) = 4.864965347266905e-32*state(12) + 1.7207046561730112e-12;
+          J_adj_block(11, 13) = 1.7e-33*state(12)*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp);
           // J^T(AIR, O3): d(d[O3]/dt) / d[AIR]
-          J_adj_block(12, 0) = 5.779235214948339e-34*state(13)*state(9);
+          J_adj_block(12, 0) = 4.9010355073085e-27*state(13)*state(9)*Kokkos::pow(Temp, -2.8);
           // J^T(AIR, H2O2): d(d[H2O2]/dt) / d[AIR]
-          J_adj_block(12, 1) = 4.864965347266905e-32*state(11);
+          J_adj_block(12, 1) = 1.7e-33*state(11)*Kokkos::exp(1000.0/Temp);
           // J^T(AIR, NO2): d(d[NO2]/dt) / d[AIR]
-          J_adj_block(12, 3) = -7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(5)/pow(7.709507080111506e-19*state(12) + 1.0, 2) + 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(5)/(7.709507080111506e-19*state(12) + 1.0) + 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(5)*log(7.709507080111506e-19*state(12))/((7.709507080111506e-19*state(12) + 1.0)*pow(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(3)*state(4)/pow(1.4174820557114162e-18*state(12) + 1.0, 2) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(3)*state(4)/(1.4174820557114162e-18*state(12) + 1.0) - 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(3)*state(4)*log(1.4174820557114162e-18*state(12))/((1.4174820557114162e-18*state(12) + 1.0)*pow(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10));
+          J_adj_block(12, 3) = 3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(3)*state(4)*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0, 2) - 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(3)*state(4)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0) - 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(3)*state(4)*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp))/((1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) - 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(5)*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(5)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(5)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0)));
           // J^T(AIR, NO3): d(d[NO3]/dt) / d[AIR]
-          J_adj_block(12, 4) = -7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(5)/pow(7.709507080111506e-19*state(12) + 1.0, 2) + 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(5)/(7.709507080111506e-19*state(12) + 1.0) + 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(5)*log(7.709507080111506e-19*state(12))/((7.709507080111506e-19*state(12) + 1.0)*pow(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(3)*state(4)/pow(1.4174820557114162e-18*state(12) + 1.0, 2) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(3)*state(4)/(1.4174820557114162e-18*state(12) + 1.0) - 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(3)*state(4)*log(1.4174820557114162e-18*state(12))/((1.4174820557114162e-18*state(12) + 1.0)*pow(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 1.0*state(7)*state(10)*(-9.105203433428452e-51*state(12)/pow(4.2119062982869013e-19*state(12) + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*state(12) + 1.0));
+          J_adj_block(12, 4) = 3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(3)*state(4)*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0, 2) - 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(3)*state(4)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0) - 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(3)*state(4)*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp))/((1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) - 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(5)*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(5)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(5)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0))) + 1.0*state(7)*state(10)*(-8.80487804878049e-51*state(12)*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0));
           // J^T(AIR, N2O5): d(d[N2O5]/dt) / d[AIR]
-          J_adj_block(12, 5) = 7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(5)/pow(7.709507080111506e-19*state(12) + 1.0, 2) - 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(5)/(7.709507080111506e-19*state(12) + 1.0) - 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(5)*log(7.709507080111506e-19*state(12))/((7.709507080111506e-19*state(12) + 1.0)*pow(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) - 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(3)*state(4)/pow(1.4174820557114162e-18*state(12) + 1.0, 2) + 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(3)*state(4)/(1.4174820557114162e-18*state(12) + 1.0) + 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(3)*state(4)*log(1.4174820557114162e-18*state(12))/((1.4174820557114162e-18*state(12) + 1.0)*pow(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10));
+          J_adj_block(12, 5) = -3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(3)*state(4)*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0, 2) + 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(3)*state(4)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0) + 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(3)*state(4)*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp))/((1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) + 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(5)*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) - 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(5)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) - 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(5)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0)));
           // J^T(AIR, HNO3): d(d[HNO3]/dt) / d[AIR]
-          J_adj_block(12, 7) = -1.0*state(7)*state(10)*(-9.105203433428452e-51*state(12)/pow(4.2119062982869013e-19*state(12) + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*state(12) + 1.0));
+          J_adj_block(12, 7) = -1.0*state(7)*state(10)*(-8.80487804878049e-51*state(12)*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0));
           // J^T(AIR, O3P): d(d[O3P]/dt) / d[AIR]
-          J_adj_block(12, 9) = -5.779235214948339e-34*state(13)*state(9);
+          J_adj_block(12, 9) = -4.9010355073085e-27*state(13)*state(9)*Kokkos::pow(Temp, -2.8);
           // J^T(AIR, OH): d(d[OH]/dt) / d[AIR]
-          J_adj_block(12, 10) = -1.0*state(7)*state(10)*(-9.105203433428452e-51*state(12)/pow(4.2119062982869013e-19*state(12) + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*state(12) + 1.0));
+          J_adj_block(12, 10) = -1.0*state(7)*state(10)*(-8.80487804878049e-51*state(12)*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0));
           // J^T(AIR, HO2): d(d[HO2]/dt) / d[AIR]
-          J_adj_block(12, 11) = -4.864965347266905e-32*state(11);
+          J_adj_block(12, 11) = -1.7e-33*state(11)*Kokkos::exp(1000.0/Temp);
           // J^T(AIR, O2): d(d[O2]/dt) / d[AIR]
-          J_adj_block(12, 13) = 4.864965347266905e-32*state(11) - 5.779235214948339e-34*state(13)*state(9);
+          J_adj_block(12, 13) = 1.7e-33*state(11)*Kokkos::exp(1000.0/Temp) - 4.9010355073085e-27*state(13)*state(9)*Kokkos::pow(Temp, -2.8);
           // J^T(O2, O3): d(d[O3]/dt) / d[O2]
-          J_adj_block(13, 0) = 5.779235214948339e-34*state(12)*state(9);
+          J_adj_block(13, 0) = 4.9010355073085e-27*state(12)*state(9)*Kokkos::pow(Temp, -2.8);
           // J^T(O2, O3P): d(d[O3P]/dt) / d[O2]
-          J_adj_block(13, 9) = -5.779235214948339e-34*state(12)*state(9);
+          J_adj_block(13, 9) = -4.9010355073085e-27*state(12)*state(9)*Kokkos::pow(Temp, -2.8);
           // J^T(O2, O2): d(d[O2]/dt) / d[O2]
-          J_adj_block(13, 13) = -5.779235214948339e-34*state(12)*state(9);
+          J_adj_block(13, 13) = -4.9010355073085e-27*state(12)*state(9)*Kokkos::pow(Temp, -2.8);
       }
 #endif
 
 #ifdef MKPP_ENABLE_ADJOINT
       template <class StateView, class DeltaView, class RateView>
-      KOKKOS_INLINE_FUNCTION void compute_tlm(const StateView& state, const DeltaView& delta_C, RateView& dF_block, const double* jvals) const {
+      KOKKOS_INLINE_FUNCTION void compute_tlm(const StateView& state, const DeltaView& delta_C, RateView& dF_block, Kokkos::View<const double*, memory_space> jvals_view, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const {
+          const double* jvals = jvals_view.data();
+          const double Temp = temp;
+          const double RH = rh;
+          const double AirDensity = air_density;
+          (void)RH;  // Reserved for future deliquescence modeling
           dF_block(0) = 0.0;
-          dF_block(0) += (-1.8183951663749815e-14*state(2) - 3.5338644420317084e-17*state(3) - 7.98786060795232e-15*state(9)) * delta_C(0);
-          dF_block(0) += (-1.8183951663749815e-14*state(0)) * delta_C(2);
-          dF_block(0) += (-3.5338644420317084e-17*state(0)) * delta_C(3);
-          dF_block(0) += (5.779235214948339e-34*state(12)*state(13) - 7.98786060795232e-15*state(0)) * delta_C(9);
-          dF_block(0) += (5.779235214948339e-34*state(13)*state(9)) * delta_C(12);
-          dF_block(0) += (5.779235214948339e-34*state(12)*state(9)) * delta_C(13);
+          dF_block(0) += (-1.8e-12*state(2)*Kokkos::exp(-1370.0/Temp) - 1.4e-13*state(3)*Kokkos::exp(-2470.0/Temp) - 8e-12*state(9)*Kokkos::exp(-2060.0/Temp)) * delta_C(0);
+          dF_block(0) += (-1.8e-12*state(0)*Kokkos::exp(-1370.0/Temp)) * delta_C(2);
+          dF_block(0) += (-1.4e-13*state(0)*Kokkos::exp(-2470.0/Temp)) * delta_C(3);
+          dF_block(0) += (4.9010355073085e-27*state(12)*state(13)*Kokkos::pow(Temp, -2.8) - 8e-12*state(0)*Kokkos::exp(-2060.0/Temp)) * delta_C(9);
+          dF_block(0) += (4.9010355073085e-27*state(13)*state(9)*Kokkos::pow(Temp, -2.8)) * delta_C(12);
+          dF_block(0) += (4.9010355073085e-27*state(12)*state(9)*Kokkos::pow(Temp, -2.8)) * delta_C(13);
           dF_block(1) = 0.0;
           dF_block(1) += (-1.0*jvals[3]) * delta_C(1);
-          dF_block(1) += (4.864965347266905e-32*state(12) + 1.7207046561730112e-12) * delta_C(11);
-          dF_block(1) += (4.864965347266905e-32*state(11)) * delta_C(12);
+          dF_block(1) += (1.7e-33*state(12)*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp)) * delta_C(11);
+          dF_block(1) += (1.7e-33*state(11)*Kokkos::exp(1000.0/Temp)) * delta_C(12);
           dF_block(2) = 0.0;
-          dF_block(2) += (-1.8183951663749815e-14*state(2)) * delta_C(0);
-          dF_block(2) += (-2.6031661982774907e-11*state(4) - 1.8183951663749815e-14*state(0)) * delta_C(2);
+          dF_block(2) += (-1.8e-12*state(2)*Kokkos::exp(-1370.0/Temp)) * delta_C(0);
+          dF_block(2) += (-1.8e-11*state(4)*Kokkos::exp(110.0/Temp) - 1.8e-12*state(0)*Kokkos::exp(-1370.0/Temp)) * delta_C(2);
           dF_block(2) += (1.0*jvals[0]) * delta_C(3);
-          dF_block(2) += (-2.6031661982774907e-11*state(2)) * delta_C(4);
+          dF_block(2) += (-1.8e-11*state(2)*Kokkos::exp(110.0/Temp)) * delta_C(4);
           dF_block(2) += (1.0*jvals[1]) * delta_C(6);
           dF_block(3) = 0.0;
-          dF_block(3) += (1.8183951663749815e-14*state(2) - 3.5338644420317084e-17*state(3)) * delta_C(0);
-          dF_block(3) += (5.206332396554981e-11*state(4) + 1.8183951663749815e-14*state(0)) * delta_C(2);
-          dF_block(3) += (-2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(4)/(1.4174820557114162e-18*state(12) + 1.0) - 3.5338644420317084e-17*state(0) - 1.0*jvals[0]) * delta_C(3);
-          dF_block(3) += (-2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(3)/(1.4174820557114162e-18*state(12) + 1.0) + 5.206332396554981e-11*state(2)) * delta_C(4);
-          dF_block(3) += (10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)/(7.709507080111506e-19*state(12) + 1.0)) * delta_C(5);
+          dF_block(3) += (1.8e-12*state(2)*Kokkos::exp(-1370.0/Temp) - 1.4e-13*state(3)*Kokkos::exp(-2470.0/Temp)) * delta_C(0);
+          dF_block(3) += (3.6e-11*state(4)*Kokkos::exp(110.0/Temp) + 1.8e-12*state(0)*Kokkos::exp(-1370.0/Temp)) * delta_C(2);
+          dF_block(3) += (-2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(4)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0) - 1.4e-13*state(0)*Kokkos::exp(-2470.0/Temp) - 1.0*jvals[0]) * delta_C(3);
+          dF_block(3) += (-2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(3)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0) + 3.6e-11*state(2)*Kokkos::exp(110.0/Temp)) * delta_C(4);
+          dF_block(3) += (2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)) * delta_C(5);
           dF_block(3) += (1.0*jvals[2]) * delta_C(7);
-          dF_block(3) += (-7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(5)/pow(7.709507080111506e-19*state(12) + 1.0, 2) + 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(5)/(7.709507080111506e-19*state(12) + 1.0) + 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(5)*log(7.709507080111506e-19*state(12))/((7.709507080111506e-19*state(12) + 1.0)*pow(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(3)*state(4)/pow(1.4174820557114162e-18*state(12) + 1.0, 2) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(3)*state(4)/(1.4174820557114162e-18*state(12) + 1.0) - 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(3)*state(4)*log(1.4174820557114162e-18*state(12))/((1.4174820557114162e-18*state(12) + 1.0)*pow(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10))) * delta_C(12);
+          dF_block(3) += (3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(3)*state(4)*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0, 2) - 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(3)*state(4)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0) - 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(3)*state(4)*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp))/((1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) - 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(5)*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(5)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(5)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0)))) * delta_C(12);
           dF_block(4) = 0.0;
-          dF_block(4) += (3.5338644420317084e-17*state(3)) * delta_C(0);
-          dF_block(4) += (-2.6031661982774907e-11*state(4)) * delta_C(2);
-          dF_block(4) += (-2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(4)/(1.4174820557114162e-18*state(12) + 1.0) + 3.5338644420317084e-17*state(0)) * delta_C(3);
-          dF_block(4) += (-2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(3)/(1.4174820557114162e-18*state(12) + 1.0) - 2.6031661982774907e-11*state(2)) * delta_C(4);
-          dF_block(4) += (10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)/(7.709507080111506e-19*state(12) + 1.0)) * delta_C(5);
-          dF_block(4) += (1.0*state(10)*(2.161777301914759e-32*state(12)/(4.2119062982869013e-19*state(12) + 1.0) + 1.0018153870816924e-13)) * delta_C(7);
-          dF_block(4) += (1.0*state(7)*(2.161777301914759e-32*state(12)/(4.2119062982869013e-19*state(12) + 1.0) + 1.0018153870816924e-13)) * delta_C(10);
-          dF_block(4) += (-7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(5)/pow(7.709507080111506e-19*state(12) + 1.0, 2) + 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(5)/(7.709507080111506e-19*state(12) + 1.0) + 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(5)*log(7.709507080111506e-19*state(12))/((7.709507080111506e-19*state(12) + 1.0)*pow(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(3)*state(4)/pow(1.4174820557114162e-18*state(12) + 1.0, 2) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(3)*state(4)/(1.4174820557114162e-18*state(12) + 1.0) - 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(3)*state(4)*log(1.4174820557114162e-18*state(12))/((1.4174820557114162e-18*state(12) + 1.0)*pow(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 1.0*state(7)*state(10)*(-9.105203433428452e-51*state(12)/pow(4.2119062982869013e-19*state(12) + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*state(12) + 1.0))) * delta_C(12);
+          dF_block(4) += (1.4e-13*state(3)*Kokkos::exp(-2470.0/Temp)) * delta_C(0);
+          dF_block(4) += (-1.8e-11*state(4)*Kokkos::exp(110.0/Temp)) * delta_C(2);
+          dF_block(4) += (-2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(4)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0) + 1.4e-13*state(0)*Kokkos::exp(-2470.0/Temp)) * delta_C(3);
+          dF_block(4) += (-2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(3)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0) - 1.8e-11*state(2)*Kokkos::exp(110.0/Temp)) * delta_C(4);
+          dF_block(4) += (2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)) * delta_C(5);
+          dF_block(4) += (1.0*state(10)*(1.9e-33*state(12)*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp))) * delta_C(7);
+          dF_block(4) += (1.0*state(7)*(1.9e-33*state(12)*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp))) * delta_C(10);
+          dF_block(4) += (3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(3)*state(4)*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0, 2) - 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(3)*state(4)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0) - 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(3)*state(4)*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp))/((1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) - 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(5)*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(5)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(5)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0))) + 1.0*state(7)*state(10)*(-8.80487804878049e-51*state(12)*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0))) * delta_C(12);
           dF_block(5) = 0.0;
-          dF_block(5) += (2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(4)/(1.4174820557114162e-18*state(12) + 1.0)) * delta_C(3);
-          dF_block(5) += (2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(3)/(1.4174820557114162e-18*state(12) + 1.0)) * delta_C(4);
-          dF_block(5) += (-10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)/(7.709507080111506e-19*state(12) + 1.0)) * delta_C(5);
-          dF_block(5) += (7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(5)/pow(7.709507080111506e-19*state(12) + 1.0, 2) - 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(5)/(7.709507080111506e-19*state(12) + 1.0) - 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(5)*log(7.709507080111506e-19*state(12))/((7.709507080111506e-19*state(12) + 1.0)*pow(pow(log(7.709507080111506e-19*state(12)), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) - 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(12)*state(3)*state(4)/pow(1.4174820557114162e-18*state(12) + 1.0, 2) + 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(3)*state(4)/(1.4174820557114162e-18*state(12) + 1.0) + 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0))*state(3)*state(4)*log(1.4174820557114162e-18*state(12))/((1.4174820557114162e-18*state(12) + 1.0)*pow(pow(log(1.4174820557114162e-18*state(12)), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10))) * delta_C(12);
+          dF_block(5) += (2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(4)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0)) * delta_C(3);
+          dF_block(5) += (2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(3)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0)) * delta_C(4);
+          dF_block(5) += (-2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)) * delta_C(5);
+          dF_block(5) += (-3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(3)*state(4)*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0, 2) + 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(3)*state(4)*Kokkos::exp(3.5/Temp)/(1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0) + 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(3)*state(4)*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp))/((1.4e-18*state(12)*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*state(12)*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) + 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(12)*state(5)*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) - 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(5)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) - 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*state(5)*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*state(12)*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0)))) * delta_C(12);
           dF_block(6) = 0.0;
           dF_block(6) += (-1.0*jvals[1]) * delta_C(6);
           dF_block(7) = 0.0;
-          dF_block(7) += (-1.0*state(10)*(2.161777301914759e-32*state(12)/(4.2119062982869013e-19*state(12) + 1.0) + 1.0018153870816924e-13) - 1.0*jvals[2]) * delta_C(7);
-          dF_block(7) += (-1.0*state(7)*(2.161777301914759e-32*state(12)/(4.2119062982869013e-19*state(12) + 1.0) + 1.0018153870816924e-13)) * delta_C(10);
-          dF_block(7) += (-1.0*state(7)*state(10)*(-9.105203433428452e-51*state(12)/pow(4.2119062982869013e-19*state(12) + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*state(12) + 1.0))) * delta_C(12);
+          dF_block(7) += (-1.0*state(10)*(1.9e-33*state(12)*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) - 1.0*jvals[2]) * delta_C(7);
+          dF_block(7) += (-1.0*state(7)*(1.9e-33*state(12)*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp))) * delta_C(10);
+          dF_block(7) += (-1.0*state(7)*state(10)*(-8.80487804878049e-51*state(12)*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0))) * delta_C(12);
           dF_block(8) = 0.0;
           dF_block(9) = 0.0;
-          dF_block(9) += (-7.98786060795232e-15*state(9)) * delta_C(0);
+          dF_block(9) += (-8e-12*state(9)*Kokkos::exp(-2060.0/Temp)) * delta_C(0);
           dF_block(9) += (1.0*jvals[0]) * delta_C(3);
-          dF_block(9) += (-5.779235214948339e-34*state(12)*state(13) - 7.98786060795232e-15*state(0)) * delta_C(9);
-          dF_block(9) += (-5.779235214948339e-34*state(13)*state(9)) * delta_C(12);
-          dF_block(9) += (-5.779235214948339e-34*state(12)*state(9)) * delta_C(13);
+          dF_block(9) += (-4.9010355073085e-27*state(12)*state(13)*Kokkos::pow(Temp, -2.8) - 8e-12*state(0)*Kokkos::exp(-2060.0/Temp)) * delta_C(9);
+          dF_block(9) += (-4.9010355073085e-27*state(13)*state(9)*Kokkos::pow(Temp, -2.8)) * delta_C(12);
+          dF_block(9) += (-4.9010355073085e-27*state(12)*state(9)*Kokkos::pow(Temp, -2.8)) * delta_C(13);
           dF_block(10) = 0.0;
           dF_block(10) += (2.0*jvals[3]) * delta_C(1);
           dF_block(10) += (1.0*jvals[1]) * delta_C(6);
-          dF_block(10) += (-1.0*state(10)*(2.161777301914759e-32*state(12)/(4.2119062982869013e-19*state(12) + 1.0) + 1.0018153870816924e-13) + 1.0*jvals[2]) * delta_C(7);
-          dF_block(10) += (-1.0*state(7)*(2.161777301914759e-32*state(12)/(4.2119062982869013e-19*state(12) + 1.0) + 1.0018153870816924e-13)) * delta_C(10);
-          dF_block(10) += (-1.0*state(7)*state(10)*(-9.105203433428452e-51*state(12)/pow(4.2119062982869013e-19*state(12) + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*state(12) + 1.0))) * delta_C(12);
+          dF_block(10) += (-1.0*state(10)*(1.9e-33*state(12)*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) + 1.0*jvals[2]) * delta_C(7);
+          dF_block(10) += (-1.0*state(7)*(1.9e-33*state(12)*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp))) * delta_C(10);
+          dF_block(10) += (-1.0*state(7)*state(10)*(-8.80487804878049e-51*state(12)*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*state(12)*Kokkos::exp(-715.0/Temp) + 1.0))) * delta_C(12);
           dF_block(11) = 0.0;
-          dF_block(11) += (-4.864965347266905e-32*state(12) - 1.7207046561730112e-12) * delta_C(11);
-          dF_block(11) += (-4.864965347266905e-32*state(11)) * delta_C(12);
+          dF_block(11) += (-1.7e-33*state(12)*Kokkos::exp(1000.0/Temp) - 2.3e-13*Kokkos::exp(600.0/Temp)) * delta_C(11);
+          dF_block(11) += (-1.7e-33*state(11)*Kokkos::exp(1000.0/Temp)) * delta_C(12);
           dF_block(12) = 0.0;
           dF_block(13) = 0.0;
-          dF_block(13) += (1.597572121590464e-14*state(9)) * delta_C(0);
-          dF_block(13) += (-5.779235214948339e-34*state(12)*state(13) + 1.597572121590464e-14*state(0)) * delta_C(9);
-          dF_block(13) += (4.864965347266905e-32*state(12) + 1.7207046561730112e-12) * delta_C(11);
-          dF_block(13) += (4.864965347266905e-32*state(11) - 5.779235214948339e-34*state(13)*state(9)) * delta_C(12);
-          dF_block(13) += (-5.779235214948339e-34*state(12)*state(9)) * delta_C(13);
+          dF_block(13) += (1.6e-11*state(9)*Kokkos::exp(-2060.0/Temp)) * delta_C(0);
+          dF_block(13) += (-4.9010355073085e-27*state(12)*state(13)*Kokkos::pow(Temp, -2.8) + 1.6e-11*state(0)*Kokkos::exp(-2060.0/Temp)) * delta_C(9);
+          dF_block(13) += (1.7e-33*state(12)*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp)) * delta_C(11);
+          dF_block(13) += (1.7e-33*state(11)*Kokkos::exp(1000.0/Temp) - 4.9010355073085e-27*state(13)*state(9)*Kokkos::pow(Temp, -2.8)) * delta_C(12);
+          dF_block(13) += (-4.9010355073085e-27*state(12)*state(9)*Kokkos::pow(Temp, -2.8)) * delta_C(13);
           dF_block(14) = 0.0;
           dF_block(15) = 0.0;
           dF_block(16) = 0.0;
@@ -328,8 +366,14 @@ namespace mkpp::generated::saprc99_mini {
        * @param jvals Array of photolysis rate constants [NUM_PHOTOLYSIS].
        */
       template <class StateView>
-      KOKKOS_INLINE_FUNCTION void integrate(double dt_total, StateView& state, const double* jvals) const {
+      KOKKOS_INLINE_FUNCTION void integrate(double dt_total, StateView& state, Kokkos::View<const double*, memory_space> jvals_view, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const {
+          const double* jvals = jvals_view.data();
+          const double Temp = temp;
+          const double RH = rh;
+          const double AirDensity = air_density;
+          (void)RH;  // Reserved for future deliquescence modeling
           const int NUM_SPECIES = 17;
+          const auto state_accessor = detail::make_stride_view(state);
           // ROS-3 coefficients (3-stage, order 3)
           const double g = 0.435866521508459;
           const double safety = 0.9;
@@ -369,8 +413,76 @@ namespace mkpp::generated::saprc99_mini {
           const double S_16 = state(Species::N2O5);  // [N2O5]
           // The expression-dense Jacobian is evaluated by bounded compiled
           // units.  The solver still uses the same symbolic sparse LU plan.
+#ifndef MKPP_USE_UNROLLED_REFERENCE
+          double J_values[54] = {};
+          auto jacobian_accessor = detail::StrideView<double, 2>::compact(J_values);
+          detail::compute_jacobian_chunk_0(state_accessor, jacobian_accessor, jvals, temp, rh, air_density);
+          double W_values[59];
+          W_values[0] = inv_g_dt;
+          W_values[1] = inv_g_dt;
+          W_values[2] = inv_g_dt;
+          W_values[3] = inv_g_dt;
+          W_values[4] = inv_g_dt - J_values[33];
+          W_values[5] = inv_g_dt - J_values[53];
+          W_values[6] = 0.0 - J_values[51];
+          W_values[7] = 0.0 - J_values[49];
+          W_values[8] = 0.0 - J_values[50];
+          W_values[9] = 0.0 - J_values[52];
+          W_values[10] = inv_g_dt - J_values[47];
+          W_values[11] = 0.0 - J_values[48];
+          W_values[12] = 0.0 - J_values[7];
+          W_values[13] = inv_g_dt - J_values[6];
+          W_values[14] = 0.0 - J_values[8];
+          W_values[15] = 0.0 - J_values[43];
+          W_values[16] = 0.0 - J_values[42];
+          W_values[17] = inv_g_dt - J_values[45];
+          W_values[18] = 0.0 - J_values[44];
+          W_values[19] = 0.0 - J_values[46];
+          W_values[20] = 0.0 - J_values[5];
+          W_values[21] = inv_g_dt - J_values[0];
+          W_values[22] = 0.0 - J_values[1];
+          W_values[23] = 0.0 - J_values[3];
+          W_values[24] = 0.0 - J_values[4];
+          W_values[25] = 0.0 - J_values[2];
+          W_values[26] = 0.0 - J_values[35];
+          W_values[27] = inv_g_dt - J_values[34];
+          W_values[28] = 0.0 - J_values[36];
+          W_values[29] = 0.0 - J_values[13];
+          W_values[30] = 0.0 - J_values[9];
+          W_values[31] = inv_g_dt - J_values[10];
+          W_values[32] = 0.0 - J_values[12];
+          W_values[33] = 0.0 - J_values[11];
+          W_values[34] = 0.0 - J_values[41];
+          W_values[35] = 0.0 - J_values[37];
+          W_values[36] = inv_g_dt - J_values[39];
+          W_values[37] = 0.0 - J_values[40];
+          W_values[38] = 0.0 - J_values[38];
+          W_values[39] = inv_g_dt;
+          W_values[40] = 0.0 - J_values[27];
+          W_values[41] = 0.0 - J_values[21];
+          W_values[42] = 0.0 - J_values[26];
+          W_values[43] = 0.0 - J_values[22];
+          W_values[44] = 0.0 - J_values[28];
+          W_values[45] = inv_g_dt - J_values[24];
+          W_values[46] = 0.0 - J_values[23];
+          W_values[47] = 0.0 - J_values[25];
+          W_values[48] = 0.0 - J_values[14];
+          W_values[49] = 0.0 - J_values[19];
+          W_values[50] = 0.0 - J_values[15];
+          W_values[51] = 0.0 - J_values[20];
+          W_values[52] = 0.0 - J_values[17];
+          W_values[53] = inv_g_dt - J_values[16];
+          W_values[54] = 0.0 - J_values[18];
+          W_values[55] = 0.0 - J_values[32];
+          W_values[56] = 0.0 - J_values[30];
+          W_values[57] = 0.0 - J_values[29];
+          W_values[58] = inv_g_dt - J_values[31];
+          double LU_values[67];
+          detail::factorize_plan(W_values, LU_values);
+#else
           double J_values[NUM_SPECIES * NUM_SPECIES] = {};
-          detail::compute_jacobian_chunk_0(state.data(), J_values, jvals, 0.0, 0.0);
+          auto jacobian_accessor = detail::make_stride_view<double, 2>(J_values, NUM_SPECIES, 1);
+          detail::compute_jacobian_chunk_0(state_accessor, jacobian_accessor, jvals, temp, rh, air_density);
           // Analytical Jacobian & Iteration Matrix W = inv_g_dt*I - J (sparse)
           double J_4_4 = J_values[6 * NUM_SPECIES + 6];
           double J_5_5 = J_values[13 * NUM_SPECIES + 13];
@@ -487,16 +599,14 @@ namespace mkpp::generated::saprc99_mini {
           W_values[16 * NUM_SPECIES + 15] = -J_16_15;
           W_values[16 * NUM_SPECIES + 16] = inv_g_dt - J_16_16;
           double LU_values[NUM_SPECIES * NUM_SPECIES] = {};
-#ifndef MKPP_USE_UNROLLED_REFERENCE
-          detail::factorize_plan(W_values, LU_values);
-#else
           detail::factorize_lu_chunk_0(W_values, LU_values);
 #endif
 
           // --- Stage 1 ---
           // Rate evaluation F1 at S
           double F_values_1[NUM_SPECIES];
-          detail::compute_rates_chunk_0(state.data(), F_values_1, jvals, 0.0, 0.0);
+          auto rate_accessor_1 = detail::make_stride_view<double, 1>(F_values_1, 1);
+          detail::compute_rates_chunk_0(state_accessor, rate_accessor_1, jvals, temp, rh, air_density);
           double F1_0 = F_values_1[16];
           double F1_1 = F_values_1[15];
           double F1_2 = F_values_1[14];
@@ -595,7 +705,9 @@ namespace mkpp::generated::saprc99_mini {
           stage_state_2[3] = Y2_15;
           stage_state_2[5] = Y2_16;
           double F_values_2[NUM_SPECIES];
-          detail::compute_rates_chunk_0(stage_state_2, F_values_2, jvals, 0.0, 0.0);
+          auto rate_accessor_2 = detail::make_stride_view<double, 1>(F_values_2, 1);
+          auto stage_state_accessor_2 = detail::make_stride_view<double, 1>(stage_state_2, 1);
+          detail::compute_rates_chunk_0(stage_state_accessor_2, rate_accessor_2, jvals, temp, rh, air_density);
           double F2_0 = F_values_2[16];
           double F2_1 = F_values_2[15];
           double F2_2 = F_values_2[14];
@@ -956,8 +1068,13 @@ namespace mkpp::generated::saprc99_mini {
 #ifdef MKPP_ENABLE_REDUCTION
       template <class StateView>
       KOKKOS_INLINE_FUNCTION void integrate_with_reduction(
-          double dt_total, StateView& state, const double* jvals, double importance_threshold) const
+          double dt_total, StateView& state, Kokkos::View<const double*, memory_space> jvals_view, double importance_threshold, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const
       {
+          const double* jvals = jvals_view.data();
+          const double Temp = temp;
+          const double RH = rh;
+          const double AirDensity = air_density;
+          (void)RH;  // Reserved for future deliquescence modeling
           const int NUM_SPECIES = 17;
           // ROS-3 coefficients (3-stage, order 3)
           const double g = 0.435866521508459;
@@ -1018,18 +1135,18 @@ namespace mkpp::generated::saprc99_mini {
           double F1_2 = 0.0;
           double F1_3 = 0.0;
           double F1_4 = -1.0*S_4*jvals[1];
-          double F1_5 = -5.779235214948339e-34*S_13*S_5*S_12 + 1.0*S_6*(4.864965347266905e-32*S_13 + 1.7207046561730112e-12) + 1.597572121590464e-14*S_9*S_12;
-          double F1_6 = -1.0*S_6*(4.864965347266905e-32*S_13 + 1.7207046561730112e-12);
-          double F1_7 = -1.0*S_7*jvals[3] + 1.0*S_6*(4.864965347266905e-32*S_13 + 1.7207046561730112e-12);
-          double F1_8 = 2.0*S_7*jvals[3] - 1.0*S_10*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13) + 1.0*S_10*jvals[2] + 1.0*S_4*jvals[1];
-          double F1_9 = 5.779235214948339e-34*S_13*S_5*S_12 - 1.8183951663749815e-14*S_11*S_9 - 3.5338644420317084e-17*S_15*S_9 - 7.98786060795232e-15*S_9*S_12;
-          double F1_10 = -1.0*S_10*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13) - 1.0*S_10*jvals[2];
-          double F1_11 = 1.0*S_4*jvals[1] - 2.6031661982774907e-11*S_11*S_14 - 1.8183951663749815e-14*S_11*S_9 + 1.0*S_15*jvals[0];
-          double F1_12 = -5.779235214948339e-34*S_13*S_5*S_12 + 1.0*S_15*jvals[0] - 7.98786060795232e-15*S_9*S_12;
+          double F1_5 = -4.9010355073085e-27*S_13*S_5*S_12*Kokkos::pow(Temp, -2.8) + 1.0*S_6*(1.7e-33*S_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp)) + 1.6e-11*S_9*S_12*Kokkos::exp(-2060.0/Temp);
+          double F1_6 = -1.0*S_6*(1.7e-33*S_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp));
+          double F1_7 = -1.0*S_7*jvals[3] + 1.0*S_6*(1.7e-33*S_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp));
+          double F1_8 = 2.0*S_7*jvals[3] - 1.0*S_10*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) + 1.0*S_10*jvals[2] + 1.0*S_4*jvals[1];
+          double F1_9 = 4.9010355073085e-27*S_13*S_5*S_12*Kokkos::pow(Temp, -2.8) - 1.8e-12*S_11*S_9*Kokkos::exp(-1370.0/Temp) - 1.4e-13*S_15*S_9*Kokkos::exp(-2470.0/Temp) - 8e-12*S_9*S_12*Kokkos::exp(-2060.0/Temp);
+          double F1_10 = -1.0*S_10*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) - 1.0*S_10*jvals[2];
+          double F1_11 = 1.0*S_4*jvals[1] - 1.8e-11*S_11*S_14*Kokkos::exp(110.0/Temp) - 1.8e-12*S_11*S_9*Kokkos::exp(-1370.0/Temp) + 1.0*S_15*jvals[0];
+          double F1_12 = -4.9010355073085e-27*S_13*S_5*S_12*Kokkos::pow(Temp, -2.8) + 1.0*S_15*jvals[0] - 8e-12*S_9*S_12*Kokkos::exp(-2060.0/Temp);
           double F1_13 = 0.0;
-          double F1_14 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/(7.709507080111506e-19*S_13 + 1.0) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) + 1.0*S_10*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13) - 2.6031661982774907e-11*S_11*S_14 + 3.5338644420317084e-17*S_15*S_9;
-          double F1_15 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/(7.709507080111506e-19*S_13 + 1.0) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) + 1.0*S_10*jvals[2] + 5.206332396554981e-11*S_11*S_14 + 1.8183951663749815e-14*S_11*S_9 - 3.5338644420317084e-17*S_15*S_9 - 1.0*S_15*jvals[0];
-          double F1_16 = -10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/(7.709507080111506e-19*S_13 + 1.0) + 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0);
+          double F1_14 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 1.0*S_10*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) - 1.8e-11*S_11*S_14*Kokkos::exp(110.0/Temp) + 1.4e-13*S_15*S_9*Kokkos::exp(-2470.0/Temp);
+          double F1_15 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 1.0*S_10*jvals[2] + 3.6e-11*S_11*S_14*Kokkos::exp(110.0/Temp) + 1.8e-12*S_11*S_9*Kokkos::exp(-1370.0/Temp) - 1.4e-13*S_15*S_9*Kokkos::exp(-2470.0/Temp) - 1.0*S_15*jvals[0];
+          double F1_16 = 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
 
           // 2. Evaluate importance and update active set
           active[0] = (Kokkos::fabs(F1_0) / (atol[0] + rtol[0] * Kokkos::fabs(state(16))) >= importance_threshold);
@@ -1052,59 +1169,59 @@ namespace mkpp::generated::saprc99_mini {
 
           // 3. Analytical Jacobian & Iteration Matrix W (identity for frozen species)
           double J_4_4 = -1.0*jvals[1];
-          double J_5_5 = -5.779235214948339e-34*S_13*S_12;
-          double J_5_6 = 4.864965347266905e-32*S_13 + 1.7207046561730112e-12;
-          double J_5_9 = 1.597572121590464e-14*S_12;
-          double J_5_12 = -5.779235214948339e-34*S_13*S_5 + 1.597572121590464e-14*S_9;
-          double J_5_13 = 4.864965347266905e-32*S_6 - 5.779235214948339e-34*S_5*S_12;
-          double J_6_6 = -4.864965347266905e-32*S_13 - 1.7207046561730112e-12;
-          double J_6_13 = -4.864965347266905e-32*S_6;
-          double J_7_6 = 4.864965347266905e-32*S_13 + 1.7207046561730112e-12;
+          double J_5_5 = -4.9010355073085e-27*S_13*S_12*Kokkos::pow(Temp, -2.8);
+          double J_5_6 = 1.7e-33*S_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp);
+          double J_5_9 = 1.6e-11*S_12*Kokkos::exp(-2060.0/Temp);
+          double J_5_12 = -4.9010355073085e-27*S_13*S_5*Kokkos::pow(Temp, -2.8) + 1.6e-11*S_9*Kokkos::exp(-2060.0/Temp);
+          double J_5_13 = 1.7e-33*S_6*Kokkos::exp(1000.0/Temp) - 4.9010355073085e-27*S_5*S_12*Kokkos::pow(Temp, -2.8);
+          double J_6_6 = -1.7e-33*S_13*Kokkos::exp(1000.0/Temp) - 2.3e-13*Kokkos::exp(600.0/Temp);
+          double J_6_13 = -1.7e-33*S_6*Kokkos::exp(1000.0/Temp);
+          double J_7_6 = 1.7e-33*S_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp);
           double J_7_7 = -1.0*jvals[3];
-          double J_7_13 = 4.864965347266905e-32*S_6;
+          double J_7_13 = 1.7e-33*S_6*Kokkos::exp(1000.0/Temp);
           double J_8_4 = 1.0*jvals[1];
           double J_8_7 = 2.0*jvals[3];
-          double J_8_8 = -1.0*S_10*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-          double J_8_10 = -1.0*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13) + 1.0*jvals[2];
-          double J_8_13 = -1.0*S_10*S_8*(-9.105203433428452e-51*S_13/pow(4.2119062982869013e-19*S_13 + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*S_13 + 1.0));
-          double J_9_5 = 5.779235214948339e-34*S_13*S_12;
-          double J_9_9 = -1.8183951663749815e-14*S_11 - 3.5338644420317084e-17*S_15 - 7.98786060795232e-15*S_12;
-          double J_9_11 = -1.8183951663749815e-14*S_9;
-          double J_9_12 = 5.779235214948339e-34*S_13*S_5 - 7.98786060795232e-15*S_9;
-          double J_9_13 = 5.779235214948339e-34*S_5*S_12;
-          double J_9_15 = -3.5338644420317084e-17*S_9;
-          double J_10_8 = -1.0*S_10*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-          double J_10_10 = -1.0*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13) - 1.0*jvals[2];
-          double J_10_13 = -1.0*S_10*S_8*(-9.105203433428452e-51*S_13/pow(4.2119062982869013e-19*S_13 + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*S_13 + 1.0));
+          double J_8_8 = -1.0*S_10*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+          double J_8_10 = -1.0*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) + 1.0*jvals[2];
+          double J_8_13 = -1.0*S_10*S_8*(-8.80487804878049e-51*S_13*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0));
+          double J_9_5 = 4.9010355073085e-27*S_13*S_12*Kokkos::pow(Temp, -2.8);
+          double J_9_9 = -1.8e-12*S_11*Kokkos::exp(-1370.0/Temp) - 1.4e-13*S_15*Kokkos::exp(-2470.0/Temp) - 8e-12*S_12*Kokkos::exp(-2060.0/Temp);
+          double J_9_11 = -1.8e-12*S_9*Kokkos::exp(-1370.0/Temp);
+          double J_9_12 = 4.9010355073085e-27*S_13*S_5*Kokkos::pow(Temp, -2.8) - 8e-12*S_9*Kokkos::exp(-2060.0/Temp);
+          double J_9_13 = 4.9010355073085e-27*S_5*S_12*Kokkos::pow(Temp, -2.8);
+          double J_9_15 = -1.4e-13*S_9*Kokkos::exp(-2470.0/Temp);
+          double J_10_8 = -1.0*S_10*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+          double J_10_10 = -1.0*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) - 1.0*jvals[2];
+          double J_10_13 = -1.0*S_10*S_8*(-8.80487804878049e-51*S_13*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0));
           double J_11_4 = 1.0*jvals[1];
-          double J_11_9 = -1.8183951663749815e-14*S_11;
-          double J_11_11 = -2.6031661982774907e-11*S_14 - 1.8183951663749815e-14*S_9;
-          double J_11_14 = -2.6031661982774907e-11*S_11;
+          double J_11_9 = -1.8e-12*S_11*Kokkos::exp(-1370.0/Temp);
+          double J_11_11 = -1.8e-11*S_14*Kokkos::exp(110.0/Temp) - 1.8e-12*S_9*Kokkos::exp(-1370.0/Temp);
+          double J_11_14 = -1.8e-11*S_11*Kokkos::exp(110.0/Temp);
           double J_11_15 = 1.0*jvals[0];
-          double J_12_5 = -5.779235214948339e-34*S_13*S_12;
-          double J_12_9 = -7.98786060795232e-15*S_12;
-          double J_12_12 = -5.779235214948339e-34*S_13*S_5 - 7.98786060795232e-15*S_9;
-          double J_12_13 = -5.779235214948339e-34*S_5*S_12;
+          double J_12_5 = -4.9010355073085e-27*S_13*S_12*Kokkos::pow(Temp, -2.8);
+          double J_12_9 = -8e-12*S_12*Kokkos::exp(-2060.0/Temp);
+          double J_12_12 = -4.9010355073085e-27*S_13*S_5*Kokkos::pow(Temp, -2.8) - 8e-12*S_9*Kokkos::exp(-2060.0/Temp);
+          double J_12_13 = -4.9010355073085e-27*S_5*S_12*Kokkos::pow(Temp, -2.8);
           double J_12_15 = 1.0*jvals[0];
-          double J_14_8 = 1.0*S_10*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-          double J_14_9 = 3.5338644420317084e-17*S_15;
-          double J_14_10 = 1.0*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-          double J_14_11 = -2.6031661982774907e-11*S_14;
-          double J_14_13 = -7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/pow(7.709507080111506e-19*S_13 + 1.0, 2) + 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16/(7.709507080111506e-19*S_13 + 1.0) + 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16*log(7.709507080111506e-19*S_13)/((7.709507080111506e-19*S_13 + 1.0)*pow(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/pow(1.4174820557114162e-18*S_13 + 1.0, 2) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) - 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14*log(1.4174820557114162e-18*S_13)/((1.4174820557114162e-18*S_13 + 1.0)*pow(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 1.0*S_10*S_8*(-9.105203433428452e-51*S_13/pow(4.2119062982869013e-19*S_13 + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*S_13 + 1.0));
-          double J_14_14 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15/(1.4174820557114162e-18*S_13 + 1.0) - 2.6031661982774907e-11*S_11;
-          double J_14_15 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_14/(1.4174820557114162e-18*S_13 + 1.0) + 3.5338644420317084e-17*S_9;
-          double J_14_16 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13/(7.709507080111506e-19*S_13 + 1.0);
-          double J_15_9 = 1.8183951663749815e-14*S_11 - 3.5338644420317084e-17*S_15;
+          double J_14_8 = 1.0*S_10*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+          double J_14_9 = 1.4e-13*S_15*Kokkos::exp(-2470.0/Temp);
+          double J_14_10 = 1.0*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+          double J_14_11 = -1.8e-11*S_14*Kokkos::exp(110.0/Temp);
+          double J_14_13 = 3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0, 2) - 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp))/((1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) - 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0))) + 1.0*S_10*S_8*(-8.80487804878049e-51*S_13*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0));
+          double J_14_14 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 1.8e-11*S_11*Kokkos::exp(110.0/Temp);
+          double J_14_15 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 1.4e-13*S_9*Kokkos::exp(-2470.0/Temp);
+          double J_14_16 = 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
+          double J_15_9 = 1.8e-12*S_11*Kokkos::exp(-1370.0/Temp) - 1.4e-13*S_15*Kokkos::exp(-2470.0/Temp);
           double J_15_10 = 1.0*jvals[2];
-          double J_15_11 = 5.206332396554981e-11*S_14 + 1.8183951663749815e-14*S_9;
-          double J_15_13 = -7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/pow(7.709507080111506e-19*S_13 + 1.0, 2) + 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16/(7.709507080111506e-19*S_13 + 1.0) + 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16*log(7.709507080111506e-19*S_13)/((7.709507080111506e-19*S_13 + 1.0)*pow(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/pow(1.4174820557114162e-18*S_13 + 1.0, 2) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) - 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14*log(1.4174820557114162e-18*S_13)/((1.4174820557114162e-18*S_13 + 1.0)*pow(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10));
-          double J_15_14 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15/(1.4174820557114162e-18*S_13 + 1.0) + 5.206332396554981e-11*S_11;
-          double J_15_15 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_14/(1.4174820557114162e-18*S_13 + 1.0) - 3.5338644420317084e-17*S_9 - 1.0*jvals[0];
-          double J_15_16 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13/(7.709507080111506e-19*S_13 + 1.0);
-          double J_16_13 = 7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/pow(7.709507080111506e-19*S_13 + 1.0, 2) - 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16/(7.709507080111506e-19*S_13 + 1.0) - 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16*log(7.709507080111506e-19*S_13)/((7.709507080111506e-19*S_13 + 1.0)*pow(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) - 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/pow(1.4174820557114162e-18*S_13 + 1.0, 2) + 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) + 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14*log(1.4174820557114162e-18*S_13)/((1.4174820557114162e-18*S_13 + 1.0)*pow(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10));
-          double J_16_14 = 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15/(1.4174820557114162e-18*S_13 + 1.0);
-          double J_16_15 = 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_14/(1.4174820557114162e-18*S_13 + 1.0);
-          double J_16_16 = -10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13/(7.709507080111506e-19*S_13 + 1.0);
+          double J_15_11 = 3.6e-11*S_14*Kokkos::exp(110.0/Temp) + 1.8e-12*S_9*Kokkos::exp(-1370.0/Temp);
+          double J_15_13 = 3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0, 2) - 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp))/((1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) - 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0)));
+          double J_15_14 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 3.6e-11*S_11*Kokkos::exp(110.0/Temp);
+          double J_15_15 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 1.4e-13*S_9*Kokkos::exp(-2470.0/Temp) - 1.0*jvals[0];
+          double J_15_16 = 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
+          double J_16_13 = -3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0, 2) + 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp))/((1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) + 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) - 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) - 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0)));
+          double J_16_14 = 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0);
+          double J_16_15 = 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0);
+          double J_16_16 = -2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
           double W_0_0 = active[0] ? inv_g_dt : 1.0;
           double W_1_1 = active[1] ? inv_g_dt : 1.0;
           double W_2_2 = active[2] ? inv_g_dt : 1.0;
@@ -1318,18 +1435,18 @@ namespace mkpp::generated::saprc99_mini {
           double F2_2 = 0.0;
           double F2_3 = 0.0;
           double F2_4 = -1.0*Y2_4*jvals[1];
-          double F2_5 = -5.779235214948339e-34*Y2_13*Y2_5*Y2_12 + 1.0*Y2_6*(4.864965347266905e-32*Y2_13 + 1.7207046561730112e-12) + 1.597572121590464e-14*Y2_9*Y2_12;
-          double F2_6 = -1.0*Y2_6*(4.864965347266905e-32*Y2_13 + 1.7207046561730112e-12);
-          double F2_7 = -1.0*Y2_7*jvals[3] + 1.0*Y2_6*(4.864965347266905e-32*Y2_13 + 1.7207046561730112e-12);
-          double F2_8 = 2.0*Y2_7*jvals[3] - 1.0*Y2_10*Y2_8*(2.161777301914759e-32*Y2_13/(4.2119062982869013e-19*Y2_13 + 1.0) + 1.0018153870816924e-13) + 1.0*Y2_10*jvals[2] + 1.0*Y2_4*jvals[1];
-          double F2_9 = 5.779235214948339e-34*Y2_13*Y2_5*Y2_12 - 1.8183951663749815e-14*Y2_11*Y2_9 - 3.5338644420317084e-17*Y2_15*Y2_9 - 7.98786060795232e-15*Y2_9*Y2_12;
-          double F2_10 = -1.0*Y2_10*Y2_8*(2.161777301914759e-32*Y2_13/(4.2119062982869013e-19*Y2_13 + 1.0) + 1.0018153870816924e-13) - 1.0*Y2_10*jvals[2];
-          double F2_11 = 1.0*Y2_4*jvals[1] - 2.6031661982774907e-11*Y2_11*Y2_14 - 1.8183951663749815e-14*Y2_11*Y2_9 + 1.0*Y2_15*jvals[0];
-          double F2_12 = -5.779235214948339e-34*Y2_13*Y2_5*Y2_12 + 1.0*Y2_15*jvals[0] - 7.98786060795232e-15*Y2_9*Y2_12;
+          double F2_5 = -4.9010355073085e-27*Y2_13*Y2_5*Y2_12*Kokkos::pow(Temp, -2.8) + 1.0*Y2_6*(1.7e-33*Y2_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp)) + 1.6e-11*Y2_9*Y2_12*Kokkos::exp(-2060.0/Temp);
+          double F2_6 = -1.0*Y2_6*(1.7e-33*Y2_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp));
+          double F2_7 = -1.0*Y2_7*jvals[3] + 1.0*Y2_6*(1.7e-33*Y2_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp));
+          double F2_8 = 2.0*Y2_7*jvals[3] - 1.0*Y2_10*Y2_8*(1.9e-33*Y2_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*Y2_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) + 1.0*Y2_10*jvals[2] + 1.0*Y2_4*jvals[1];
+          double F2_9 = 4.9010355073085e-27*Y2_13*Y2_5*Y2_12*Kokkos::pow(Temp, -2.8) - 1.8e-12*Y2_11*Y2_9*Kokkos::exp(-1370.0/Temp) - 1.4e-13*Y2_15*Y2_9*Kokkos::exp(-2470.0/Temp) - 8e-12*Y2_9*Y2_12*Kokkos::exp(-2060.0/Temp);
+          double F2_10 = -1.0*Y2_10*Y2_8*(1.9e-33*Y2_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*Y2_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) - 1.0*Y2_10*jvals[2];
+          double F2_11 = 1.0*Y2_4*jvals[1] - 1.8e-11*Y2_11*Y2_14*Kokkos::exp(110.0/Temp) - 1.8e-12*Y2_11*Y2_9*Kokkos::exp(-1370.0/Temp) + 1.0*Y2_15*jvals[0];
+          double F2_12 = -4.9010355073085e-27*Y2_13*Y2_5*Y2_12*Kokkos::pow(Temp, -2.8) + 1.0*Y2_15*jvals[0] - 8e-12*Y2_9*Y2_12*Kokkos::exp(-2060.0/Temp);
           double F2_13 = 0.0;
-          double F2_14 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*Y2_13), 2)/(M_LN10 * M_LN10) + 1.0))*Y2_13*Y2_16/(7.709507080111506e-19*Y2_13 + 1.0) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*Y2_13), 2)/(M_LN10 * M_LN10) + 1.0))*Y2_13*Y2_15*Y2_14/(1.4174820557114162e-18*Y2_13 + 1.0) + 1.0*Y2_10*Y2_8*(2.161777301914759e-32*Y2_13/(4.2119062982869013e-19*Y2_13 + 1.0) + 1.0018153870816924e-13) - 2.6031661982774907e-11*Y2_11*Y2_14 + 3.5338644420317084e-17*Y2_15*Y2_9;
-          double F2_15 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*Y2_13), 2)/(M_LN10 * M_LN10) + 1.0))*Y2_13*Y2_16/(7.709507080111506e-19*Y2_13 + 1.0) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*Y2_13), 2)/(M_LN10 * M_LN10) + 1.0))*Y2_13*Y2_15*Y2_14/(1.4174820557114162e-18*Y2_13 + 1.0) + 1.0*Y2_10*jvals[2] + 5.206332396554981e-11*Y2_11*Y2_14 + 1.8183951663749815e-14*Y2_11*Y2_9 - 3.5338644420317084e-17*Y2_15*Y2_9 - 1.0*Y2_15*jvals[0];
-          double F2_16 = -10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*Y2_13), 2)/(M_LN10 * M_LN10) + 1.0))*Y2_13*Y2_16/(7.709507080111506e-19*Y2_13 + 1.0) + 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*Y2_13), 2)/(M_LN10 * M_LN10) + 1.0))*Y2_13*Y2_15*Y2_14/(1.4174820557114162e-18*Y2_13 + 1.0);
+          double F2_14 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*Y2_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*Y2_13*Y2_15*Y2_14*Kokkos::exp(3.5/Temp)/(1.4e-18*Y2_13*Kokkos::exp(3.7/Temp) + 1.0) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*Y2_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*Y2_13*Y2_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*Y2_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 1.0*Y2_10*Y2_8*(1.9e-33*Y2_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*Y2_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) - 1.8e-11*Y2_11*Y2_14*Kokkos::exp(110.0/Temp) + 1.4e-13*Y2_15*Y2_9*Kokkos::exp(-2470.0/Temp);
+          double F2_15 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*Y2_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*Y2_13*Y2_15*Y2_14*Kokkos::exp(3.5/Temp)/(1.4e-18*Y2_13*Kokkos::exp(3.7/Temp) + 1.0) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*Y2_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*Y2_13*Y2_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*Y2_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 1.0*Y2_10*jvals[2] + 3.6e-11*Y2_11*Y2_14*Kokkos::exp(110.0/Temp) + 1.8e-12*Y2_11*Y2_9*Kokkos::exp(-1370.0/Temp) - 1.4e-13*Y2_15*Y2_9*Kokkos::exp(-2470.0/Temp) - 1.0*Y2_15*jvals[0];
+          double F2_16 = 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*Y2_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*Y2_13*Y2_15*Y2_14*Kokkos::exp(3.5/Temp)/(1.4e-18*Y2_13*Kokkos::exp(3.7/Temp) + 1.0) - 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*Y2_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*Y2_13*Y2_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*Y2_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
           // RHS for stage 2
           double rhs2_0 = F2_0 + (-1.0156171083877703 / dt) * K1_0;
           double rhs2_1 = F2_1 + (-1.0156171083877703 / dt) * K1_1;
@@ -1662,10 +1779,15 @@ namespace mkpp::generated::saprc99_mini {
       // Returns number of accepted steps, or -1 if MAX_STEPS exceeded.
       template <class StateView>
       KOKKOS_INLINE_FUNCTION int integrate_fwd_checkpoint(
-          double dt_total, StateView& state, const double* jvals,
-          CheckpointBuffer& chk) const
+          double dt_total, StateView& state, Kokkos::View<const double*, memory_space> jvals_view,
+          CheckpointBuffer& chk, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const
       {
+          const double* jvals = jvals_view.data();
           const int NUM_SPECIES = 17;
+          const double Temp = temp;
+          const double RH = rh;
+          const double AirDensity = air_density;
+          (void)RH;  // Reserved for future deliquescence modeling
           // ROS-3 coefficients (3-stage, order 3)
           const double g = 0.435866521508459;
           const double safety = 0.9;
@@ -1701,81 +1823,81 @@ namespace mkpp::generated::saprc99_mini {
           const double S_16 = state(Species::N2O5);  // [N2O5]
 
           // --- CSE Temporaries ---
-          const double cse_tmp_0 = 0.0033540164346805303;
-          const double cse_tmp_1 = 1.4e-18*S_12*exp(3.7*cse_tmp_0);
-          const double cse_tmp_2 = pow(M_LN10, -2);
-          const double cse_tmp_3 = 1.0082241084723093e-18*S_12*exp(-80.0*cse_tmp_0);
+          const double cse_tmp_0 = 1.0/Temp;
+          const double cse_tmp_1 = 1.4e-18*S_12*Kokkos::exp(3.7*cse_tmp_0);
+          const double cse_tmp_2 = Kokkos::pow(Kokkos::log(10.0), -2);
+          const double cse_tmp_3 = 1.24621148321367e-27*S_12*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0*cse_tmp_0);
 
           // --- Reaction Rate Fluxes R_m ---
           const double R_0 = S_3*jvals[0];
-          const double R_1 = 5.779235214948339e-34*S_12*S_13*S_9;
-          const double R_2 = 8e-12*S_0*S_9*exp(-2060.0*cse_tmp_0);
-          const double R_3 = 1.8e-12*S_2*S_0*exp(-1370.0*cse_tmp_0);
-          const double R_4 = 1.4e-13*S_3*S_0*exp(-2470.0*cse_tmp_0);
-          const double R_5 = 1.8e-11*S_2*S_4*exp(110.0*cse_tmp_0);
-          const double R_6 = 2.8e-30*pow(0.45, 1.0/(cse_tmp_2*pow(log(cse_tmp_1), 2) + 1.0))*S_12*S_3*S_4*exp(3.5*cse_tmp_0)/(cse_tmp_1 + 1.0);
-          const double R_7 = 0.0009785825256112335*pow(0.45, 1.0/(cse_tmp_2*pow(log(cse_tmp_3), 2) + 1.0))*S_12*S_5*exp(11000.0*cse_tmp_0)/(cse_tmp_3 + 1.0);
-          const double R_8 = S_7*S_10*(1.9e-33*S_12*exp(725.0*cse_tmp_0)/(4.63414634146341e-18*S_12*exp(-715.0*cse_tmp_0) + 1.0) + 7.2e-15*exp(785.0*cse_tmp_0));
-          const double R_9 = S_11*(1.7e-33*S_12*exp(1000.0*cse_tmp_0) + 2.3e-13*exp(600.0*cse_tmp_0));
+          const double R_1 = 4.9010355073085e-27*S_12*S_13*S_9*Kokkos::pow(Temp, -2.8);
+          const double R_2 = 8e-12*S_0*S_9*Kokkos::exp(-2060.0*cse_tmp_0);
+          const double R_3 = 1.8e-12*S_2*S_0*Kokkos::exp(-1370.0*cse_tmp_0);
+          const double R_4 = 1.4e-13*S_3*S_0*Kokkos::exp(-2470.0*cse_tmp_0);
+          const double R_5 = 1.8e-11*S_2*S_4*Kokkos::exp(110.0*cse_tmp_0);
+          const double R_6 = 2.8e-30*Kokkos::pow(0.45, 1.0/(cse_tmp_2*Kokkos::pow(Kokkos::log(cse_tmp_1), 2) + 1.0))*S_12*S_3*S_4*Kokkos::exp(3.5*cse_tmp_0)/(cse_tmp_1 + 1.0);
+          const double R_7 = 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(cse_tmp_2*Kokkos::pow(Kokkos::log(cse_tmp_3), 2) + 1.0))*S_12*S_5*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0*cse_tmp_0)/(cse_tmp_3 + 1.0);
+          const double R_8 = S_7*S_10*(1.9e-33*S_12*Kokkos::exp(725.0*cse_tmp_0)/(4.63414634146341e-18*S_12*Kokkos::exp(-715.0*cse_tmp_0) + 1.0) + 7.2e-15*Kokkos::exp(785.0*cse_tmp_0));
+          const double R_9 = S_11*(1.7e-33*S_12*Kokkos::exp(1000.0*cse_tmp_0) + 2.3e-13*Kokkos::exp(600.0*cse_tmp_0));
           const double R_10 = S_6*jvals[1];
           const double R_11 = S_7*jvals[2];
           const double R_12 = S_1*jvals[3];
 
           // Analytical Jacobian & Iteration Matrix W = inv_g_dt*I - J (sparse)
           double J_4_4 = -1.0*jvals[1];
-          double J_5_5 = -5.779235214948339e-34*S_13*S_12;
-          double J_5_6 = 4.864965347266905e-32*S_13 + 1.7207046561730112e-12;
-          double J_5_9 = 1.597572121590464e-14*S_12;
-          double J_5_12 = -5.779235214948339e-34*S_13*S_5 + 1.597572121590464e-14*S_9;
-          double J_5_13 = 4.864965347266905e-32*S_6 - 5.779235214948339e-34*S_5*S_12;
-          double J_6_6 = -4.864965347266905e-32*S_13 - 1.7207046561730112e-12;
-          double J_6_13 = -4.864965347266905e-32*S_6;
-          double J_7_6 = 4.864965347266905e-32*S_13 + 1.7207046561730112e-12;
+          double J_5_5 = -4.9010355073085e-27*S_13*S_12*Kokkos::pow(Temp, -2.8);
+          double J_5_6 = 1.7e-33*S_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp);
+          double J_5_9 = 1.6e-11*S_12*Kokkos::exp(-2060.0/Temp);
+          double J_5_12 = -4.9010355073085e-27*S_13*S_5*Kokkos::pow(Temp, -2.8) + 1.6e-11*S_9*Kokkos::exp(-2060.0/Temp);
+          double J_5_13 = 1.7e-33*S_6*Kokkos::exp(1000.0/Temp) - 4.9010355073085e-27*S_5*S_12*Kokkos::pow(Temp, -2.8);
+          double J_6_6 = -1.7e-33*S_13*Kokkos::exp(1000.0/Temp) - 2.3e-13*Kokkos::exp(600.0/Temp);
+          double J_6_13 = -1.7e-33*S_6*Kokkos::exp(1000.0/Temp);
+          double J_7_6 = 1.7e-33*S_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp);
           double J_7_7 = -1.0*jvals[3];
-          double J_7_13 = 4.864965347266905e-32*S_6;
+          double J_7_13 = 1.7e-33*S_6*Kokkos::exp(1000.0/Temp);
           double J_8_4 = 1.0*jvals[1];
           double J_8_7 = 2.0*jvals[3];
-          double J_8_8 = -1.0*S_10*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-          double J_8_10 = -1.0*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13) + 1.0*jvals[2];
-          double J_8_13 = -1.0*S_10*S_8*(-9.105203433428452e-51*S_13/pow(4.2119062982869013e-19*S_13 + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*S_13 + 1.0));
-          double J_9_5 = 5.779235214948339e-34*S_13*S_12;
-          double J_9_9 = -1.8183951663749815e-14*S_11 - 3.5338644420317084e-17*S_15 - 7.98786060795232e-15*S_12;
-          double J_9_11 = -1.8183951663749815e-14*S_9;
-          double J_9_12 = 5.779235214948339e-34*S_13*S_5 - 7.98786060795232e-15*S_9;
-          double J_9_13 = 5.779235214948339e-34*S_5*S_12;
-          double J_9_15 = -3.5338644420317084e-17*S_9;
-          double J_10_8 = -1.0*S_10*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-          double J_10_10 = -1.0*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13) - 1.0*jvals[2];
-          double J_10_13 = -1.0*S_10*S_8*(-9.105203433428452e-51*S_13/pow(4.2119062982869013e-19*S_13 + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*S_13 + 1.0));
+          double J_8_8 = -1.0*S_10*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+          double J_8_10 = -1.0*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) + 1.0*jvals[2];
+          double J_8_13 = -1.0*S_10*S_8*(-8.80487804878049e-51*S_13*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0));
+          double J_9_5 = 4.9010355073085e-27*S_13*S_12*Kokkos::pow(Temp, -2.8);
+          double J_9_9 = -1.8e-12*S_11*Kokkos::exp(-1370.0/Temp) - 1.4e-13*S_15*Kokkos::exp(-2470.0/Temp) - 8e-12*S_12*Kokkos::exp(-2060.0/Temp);
+          double J_9_11 = -1.8e-12*S_9*Kokkos::exp(-1370.0/Temp);
+          double J_9_12 = 4.9010355073085e-27*S_13*S_5*Kokkos::pow(Temp, -2.8) - 8e-12*S_9*Kokkos::exp(-2060.0/Temp);
+          double J_9_13 = 4.9010355073085e-27*S_5*S_12*Kokkos::pow(Temp, -2.8);
+          double J_9_15 = -1.4e-13*S_9*Kokkos::exp(-2470.0/Temp);
+          double J_10_8 = -1.0*S_10*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+          double J_10_10 = -1.0*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) - 1.0*jvals[2];
+          double J_10_13 = -1.0*S_10*S_8*(-8.80487804878049e-51*S_13*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0));
           double J_11_4 = 1.0*jvals[1];
-          double J_11_9 = -1.8183951663749815e-14*S_11;
-          double J_11_11 = -2.6031661982774907e-11*S_14 - 1.8183951663749815e-14*S_9;
-          double J_11_14 = -2.6031661982774907e-11*S_11;
+          double J_11_9 = -1.8e-12*S_11*Kokkos::exp(-1370.0/Temp);
+          double J_11_11 = -1.8e-11*S_14*Kokkos::exp(110.0/Temp) - 1.8e-12*S_9*Kokkos::exp(-1370.0/Temp);
+          double J_11_14 = -1.8e-11*S_11*Kokkos::exp(110.0/Temp);
           double J_11_15 = 1.0*jvals[0];
-          double J_12_5 = -5.779235214948339e-34*S_13*S_12;
-          double J_12_9 = -7.98786060795232e-15*S_12;
-          double J_12_12 = -5.779235214948339e-34*S_13*S_5 - 7.98786060795232e-15*S_9;
-          double J_12_13 = -5.779235214948339e-34*S_5*S_12;
+          double J_12_5 = -4.9010355073085e-27*S_13*S_12*Kokkos::pow(Temp, -2.8);
+          double J_12_9 = -8e-12*S_12*Kokkos::exp(-2060.0/Temp);
+          double J_12_12 = -4.9010355073085e-27*S_13*S_5*Kokkos::pow(Temp, -2.8) - 8e-12*S_9*Kokkos::exp(-2060.0/Temp);
+          double J_12_13 = -4.9010355073085e-27*S_5*S_12*Kokkos::pow(Temp, -2.8);
           double J_12_15 = 1.0*jvals[0];
-          double J_14_8 = 1.0*S_10*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-          double J_14_9 = 3.5338644420317084e-17*S_15;
-          double J_14_10 = 1.0*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-          double J_14_11 = -2.6031661982774907e-11*S_14;
-          double J_14_13 = -7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/pow(7.709507080111506e-19*S_13 + 1.0, 2) + 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16/(7.709507080111506e-19*S_13 + 1.0) + 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16*log(7.709507080111506e-19*S_13)/((7.709507080111506e-19*S_13 + 1.0)*pow(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/pow(1.4174820557114162e-18*S_13 + 1.0, 2) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) - 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14*log(1.4174820557114162e-18*S_13)/((1.4174820557114162e-18*S_13 + 1.0)*pow(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 1.0*S_10*S_8*(-9.105203433428452e-51*S_13/pow(4.2119062982869013e-19*S_13 + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*S_13 + 1.0));
-          double J_14_14 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15/(1.4174820557114162e-18*S_13 + 1.0) - 2.6031661982774907e-11*S_11;
-          double J_14_15 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_14/(1.4174820557114162e-18*S_13 + 1.0) + 3.5338644420317084e-17*S_9;
-          double J_14_16 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13/(7.709507080111506e-19*S_13 + 1.0);
-          double J_15_9 = 1.8183951663749815e-14*S_11 - 3.5338644420317084e-17*S_15;
+          double J_14_8 = 1.0*S_10*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+          double J_14_9 = 1.4e-13*S_15*Kokkos::exp(-2470.0/Temp);
+          double J_14_10 = 1.0*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+          double J_14_11 = -1.8e-11*S_14*Kokkos::exp(110.0/Temp);
+          double J_14_13 = 3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0, 2) - 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp))/((1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) - 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0))) + 1.0*S_10*S_8*(-8.80487804878049e-51*S_13*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0));
+          double J_14_14 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 1.8e-11*S_11*Kokkos::exp(110.0/Temp);
+          double J_14_15 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 1.4e-13*S_9*Kokkos::exp(-2470.0/Temp);
+          double J_14_16 = 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
+          double J_15_9 = 1.8e-12*S_11*Kokkos::exp(-1370.0/Temp) - 1.4e-13*S_15*Kokkos::exp(-2470.0/Temp);
           double J_15_10 = 1.0*jvals[2];
-          double J_15_11 = 5.206332396554981e-11*S_14 + 1.8183951663749815e-14*S_9;
-          double J_15_13 = -7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/pow(7.709507080111506e-19*S_13 + 1.0, 2) + 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16/(7.709507080111506e-19*S_13 + 1.0) + 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16*log(7.709507080111506e-19*S_13)/((7.709507080111506e-19*S_13 + 1.0)*pow(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/pow(1.4174820557114162e-18*S_13 + 1.0, 2) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) - 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14*log(1.4174820557114162e-18*S_13)/((1.4174820557114162e-18*S_13 + 1.0)*pow(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10));
-          double J_15_14 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15/(1.4174820557114162e-18*S_13 + 1.0) + 5.206332396554981e-11*S_11;
-          double J_15_15 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_14/(1.4174820557114162e-18*S_13 + 1.0) - 3.5338644420317084e-17*S_9 - 1.0*jvals[0];
-          double J_15_16 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13/(7.709507080111506e-19*S_13 + 1.0);
-          double J_16_13 = 7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/pow(7.709507080111506e-19*S_13 + 1.0, 2) - 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16/(7.709507080111506e-19*S_13 + 1.0) - 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16*log(7.709507080111506e-19*S_13)/((7.709507080111506e-19*S_13 + 1.0)*pow(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) - 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/pow(1.4174820557114162e-18*S_13 + 1.0, 2) + 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) + 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14*log(1.4174820557114162e-18*S_13)/((1.4174820557114162e-18*S_13 + 1.0)*pow(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10));
-          double J_16_14 = 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15/(1.4174820557114162e-18*S_13 + 1.0);
-          double J_16_15 = 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_14/(1.4174820557114162e-18*S_13 + 1.0);
-          double J_16_16 = -10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13/(7.709507080111506e-19*S_13 + 1.0);
+          double J_15_11 = 3.6e-11*S_14*Kokkos::exp(110.0/Temp) + 1.8e-12*S_9*Kokkos::exp(-1370.0/Temp);
+          double J_15_13 = 3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0, 2) - 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp))/((1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) - 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0)));
+          double J_15_14 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 3.6e-11*S_11*Kokkos::exp(110.0/Temp);
+          double J_15_15 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 1.4e-13*S_9*Kokkos::exp(-2470.0/Temp) - 1.0*jvals[0];
+          double J_15_16 = 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
+          double J_16_13 = -3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0, 2) + 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp))/((1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) + 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) - 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) - 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0)));
+          double J_16_14 = 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0);
+          double J_16_15 = 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0);
+          double J_16_16 = -2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
           // Block 0: species [N2, H2O, HNO4, HONO, O2, O3, AIR]
           double W_0_0 = inv_g_dt;
           // Block 1: species [M]
@@ -1936,18 +2058,18 @@ namespace mkpp::generated::saprc99_mini {
           double F1_2 = 0.0;
           double F1_3 = 0.0;
           double F1_4 = -1.0*S_4*jvals[1];
-          double F1_5 = -5.779235214948339e-34*S_13*S_5*S_12 + 1.0*S_6*(4.864965347266905e-32*S_13 + 1.7207046561730112e-12) + 1.597572121590464e-14*S_9*S_12;
-          double F1_6 = -1.0*S_6*(4.864965347266905e-32*S_13 + 1.7207046561730112e-12);
-          double F1_7 = -1.0*S_7*jvals[3] + 1.0*S_6*(4.864965347266905e-32*S_13 + 1.7207046561730112e-12);
-          double F1_8 = 2.0*S_7*jvals[3] - 1.0*S_10*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13) + 1.0*S_10*jvals[2] + 1.0*S_4*jvals[1];
-          double F1_9 = 5.779235214948339e-34*S_13*S_5*S_12 - 1.8183951663749815e-14*S_11*S_9 - 3.5338644420317084e-17*S_15*S_9 - 7.98786060795232e-15*S_9*S_12;
-          double F1_10 = -1.0*S_10*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13) - 1.0*S_10*jvals[2];
-          double F1_11 = 1.0*S_4*jvals[1] - 2.6031661982774907e-11*S_11*S_14 - 1.8183951663749815e-14*S_11*S_9 + 1.0*S_15*jvals[0];
-          double F1_12 = -5.779235214948339e-34*S_13*S_5*S_12 + 1.0*S_15*jvals[0] - 7.98786060795232e-15*S_9*S_12;
+          double F1_5 = -4.9010355073085e-27*S_13*S_5*S_12*Kokkos::pow(Temp, -2.8) + 1.0*S_6*(1.7e-33*S_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp)) + 1.6e-11*S_9*S_12*Kokkos::exp(-2060.0/Temp);
+          double F1_6 = -1.0*S_6*(1.7e-33*S_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp));
+          double F1_7 = -1.0*S_7*jvals[3] + 1.0*S_6*(1.7e-33*S_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp));
+          double F1_8 = 2.0*S_7*jvals[3] - 1.0*S_10*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) + 1.0*S_10*jvals[2] + 1.0*S_4*jvals[1];
+          double F1_9 = 4.9010355073085e-27*S_13*S_5*S_12*Kokkos::pow(Temp, -2.8) - 1.8e-12*S_11*S_9*Kokkos::exp(-1370.0/Temp) - 1.4e-13*S_15*S_9*Kokkos::exp(-2470.0/Temp) - 8e-12*S_9*S_12*Kokkos::exp(-2060.0/Temp);
+          double F1_10 = -1.0*S_10*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) - 1.0*S_10*jvals[2];
+          double F1_11 = 1.0*S_4*jvals[1] - 1.8e-11*S_11*S_14*Kokkos::exp(110.0/Temp) - 1.8e-12*S_11*S_9*Kokkos::exp(-1370.0/Temp) + 1.0*S_15*jvals[0];
+          double F1_12 = -4.9010355073085e-27*S_13*S_5*S_12*Kokkos::pow(Temp, -2.8) + 1.0*S_15*jvals[0] - 8e-12*S_9*S_12*Kokkos::exp(-2060.0/Temp);
           double F1_13 = 0.0;
-          double F1_14 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/(7.709507080111506e-19*S_13 + 1.0) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) + 1.0*S_10*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13) - 2.6031661982774907e-11*S_11*S_14 + 3.5338644420317084e-17*S_15*S_9;
-          double F1_15 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/(7.709507080111506e-19*S_13 + 1.0) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) + 1.0*S_10*jvals[2] + 5.206332396554981e-11*S_11*S_14 + 1.8183951663749815e-14*S_11*S_9 - 3.5338644420317084e-17*S_15*S_9 - 1.0*S_15*jvals[0];
-          double F1_16 = -10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/(7.709507080111506e-19*S_13 + 1.0) + 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0);
+          double F1_14 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 1.0*S_10*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) - 1.8e-11*S_11*S_14*Kokkos::exp(110.0/Temp) + 1.4e-13*S_15*S_9*Kokkos::exp(-2470.0/Temp);
+          double F1_15 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 1.0*S_10*jvals[2] + 3.6e-11*S_11*S_14*Kokkos::exp(110.0/Temp) + 1.8e-12*S_11*S_9*Kokkos::exp(-1370.0/Temp) - 1.4e-13*S_15*S_9*Kokkos::exp(-2470.0/Temp) - 1.0*S_15*jvals[0];
+          double F1_16 = 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
           // Block 0: K1 forward sub [N2, H2O, HNO4, HONO, O2, O3, AIR]
           double y1_0 = F1_0;
           // Block 1: K1 forward sub [M]
@@ -2030,18 +2152,18 @@ namespace mkpp::generated::saprc99_mini {
           double F2_2 = 0.0;
           double F2_3 = 0.0;
           double F2_4 = -1.0*Y2_4*jvals[1];
-          double F2_5 = -5.779235214948339e-34*Y2_13*Y2_5*Y2_12 + 1.0*Y2_6*(4.864965347266905e-32*Y2_13 + 1.7207046561730112e-12) + 1.597572121590464e-14*Y2_9*Y2_12;
-          double F2_6 = -1.0*Y2_6*(4.864965347266905e-32*Y2_13 + 1.7207046561730112e-12);
-          double F2_7 = -1.0*Y2_7*jvals[3] + 1.0*Y2_6*(4.864965347266905e-32*Y2_13 + 1.7207046561730112e-12);
-          double F2_8 = 2.0*Y2_7*jvals[3] - 1.0*Y2_10*Y2_8*(2.161777301914759e-32*Y2_13/(4.2119062982869013e-19*Y2_13 + 1.0) + 1.0018153870816924e-13) + 1.0*Y2_10*jvals[2] + 1.0*Y2_4*jvals[1];
-          double F2_9 = 5.779235214948339e-34*Y2_13*Y2_5*Y2_12 - 1.8183951663749815e-14*Y2_11*Y2_9 - 3.5338644420317084e-17*Y2_15*Y2_9 - 7.98786060795232e-15*Y2_9*Y2_12;
-          double F2_10 = -1.0*Y2_10*Y2_8*(2.161777301914759e-32*Y2_13/(4.2119062982869013e-19*Y2_13 + 1.0) + 1.0018153870816924e-13) - 1.0*Y2_10*jvals[2];
-          double F2_11 = 1.0*Y2_4*jvals[1] - 2.6031661982774907e-11*Y2_11*Y2_14 - 1.8183951663749815e-14*Y2_11*Y2_9 + 1.0*Y2_15*jvals[0];
-          double F2_12 = -5.779235214948339e-34*Y2_13*Y2_5*Y2_12 + 1.0*Y2_15*jvals[0] - 7.98786060795232e-15*Y2_9*Y2_12;
+          double F2_5 = -4.9010355073085e-27*Y2_13*Y2_5*Y2_12*Kokkos::pow(Temp, -2.8) + 1.0*Y2_6*(1.7e-33*Y2_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp)) + 1.6e-11*Y2_9*Y2_12*Kokkos::exp(-2060.0/Temp);
+          double F2_6 = -1.0*Y2_6*(1.7e-33*Y2_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp));
+          double F2_7 = -1.0*Y2_7*jvals[3] + 1.0*Y2_6*(1.7e-33*Y2_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp));
+          double F2_8 = 2.0*Y2_7*jvals[3] - 1.0*Y2_10*Y2_8*(1.9e-33*Y2_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*Y2_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) + 1.0*Y2_10*jvals[2] + 1.0*Y2_4*jvals[1];
+          double F2_9 = 4.9010355073085e-27*Y2_13*Y2_5*Y2_12*Kokkos::pow(Temp, -2.8) - 1.8e-12*Y2_11*Y2_9*Kokkos::exp(-1370.0/Temp) - 1.4e-13*Y2_15*Y2_9*Kokkos::exp(-2470.0/Temp) - 8e-12*Y2_9*Y2_12*Kokkos::exp(-2060.0/Temp);
+          double F2_10 = -1.0*Y2_10*Y2_8*(1.9e-33*Y2_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*Y2_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) - 1.0*Y2_10*jvals[2];
+          double F2_11 = 1.0*Y2_4*jvals[1] - 1.8e-11*Y2_11*Y2_14*Kokkos::exp(110.0/Temp) - 1.8e-12*Y2_11*Y2_9*Kokkos::exp(-1370.0/Temp) + 1.0*Y2_15*jvals[0];
+          double F2_12 = -4.9010355073085e-27*Y2_13*Y2_5*Y2_12*Kokkos::pow(Temp, -2.8) + 1.0*Y2_15*jvals[0] - 8e-12*Y2_9*Y2_12*Kokkos::exp(-2060.0/Temp);
           double F2_13 = 0.0;
-          double F2_14 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*Y2_13), 2)/(M_LN10 * M_LN10) + 1.0))*Y2_13*Y2_16/(7.709507080111506e-19*Y2_13 + 1.0) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*Y2_13), 2)/(M_LN10 * M_LN10) + 1.0))*Y2_13*Y2_15*Y2_14/(1.4174820557114162e-18*Y2_13 + 1.0) + 1.0*Y2_10*Y2_8*(2.161777301914759e-32*Y2_13/(4.2119062982869013e-19*Y2_13 + 1.0) + 1.0018153870816924e-13) - 2.6031661982774907e-11*Y2_11*Y2_14 + 3.5338644420317084e-17*Y2_15*Y2_9;
-          double F2_15 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*Y2_13), 2)/(M_LN10 * M_LN10) + 1.0))*Y2_13*Y2_16/(7.709507080111506e-19*Y2_13 + 1.0) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*Y2_13), 2)/(M_LN10 * M_LN10) + 1.0))*Y2_13*Y2_15*Y2_14/(1.4174820557114162e-18*Y2_13 + 1.0) + 1.0*Y2_10*jvals[2] + 5.206332396554981e-11*Y2_11*Y2_14 + 1.8183951663749815e-14*Y2_11*Y2_9 - 3.5338644420317084e-17*Y2_15*Y2_9 - 1.0*Y2_15*jvals[0];
-          double F2_16 = -10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*Y2_13), 2)/(M_LN10 * M_LN10) + 1.0))*Y2_13*Y2_16/(7.709507080111506e-19*Y2_13 + 1.0) + 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*Y2_13), 2)/(M_LN10 * M_LN10) + 1.0))*Y2_13*Y2_15*Y2_14/(1.4174820557114162e-18*Y2_13 + 1.0);
+          double F2_14 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*Y2_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*Y2_13*Y2_15*Y2_14*Kokkos::exp(3.5/Temp)/(1.4e-18*Y2_13*Kokkos::exp(3.7/Temp) + 1.0) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*Y2_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*Y2_13*Y2_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*Y2_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 1.0*Y2_10*Y2_8*(1.9e-33*Y2_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*Y2_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) - 1.8e-11*Y2_11*Y2_14*Kokkos::exp(110.0/Temp) + 1.4e-13*Y2_15*Y2_9*Kokkos::exp(-2470.0/Temp);
+          double F2_15 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*Y2_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*Y2_13*Y2_15*Y2_14*Kokkos::exp(3.5/Temp)/(1.4e-18*Y2_13*Kokkos::exp(3.7/Temp) + 1.0) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*Y2_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*Y2_13*Y2_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*Y2_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 1.0*Y2_10*jvals[2] + 3.6e-11*Y2_11*Y2_14*Kokkos::exp(110.0/Temp) + 1.8e-12*Y2_11*Y2_9*Kokkos::exp(-1370.0/Temp) - 1.4e-13*Y2_15*Y2_9*Kokkos::exp(-2470.0/Temp) - 1.0*Y2_15*jvals[0];
+          double F2_16 = 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*Y2_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*Y2_13*Y2_15*Y2_14*Kokkos::exp(3.5/Temp)/(1.4e-18*Y2_13*Kokkos::exp(3.7/Temp) + 1.0) - 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*Y2_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*Y2_13*Y2_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*Y2_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
           // RHS for stage 2
           double rhs2_0 = F2_0 + (-1.0156171083877703 / dt) * K1_0;
           double rhs2_1 = F2_1 + (-1.0156171083877703 / dt) * K1_1;
@@ -2431,9 +2553,17 @@ namespace mkpp::generated::saprc99_mini {
       template <class StateView, class AdjView>
       KOKKOS_INLINE_FUNCTION void integrate_adj(
           double dt_total, const StateView& state_final,
-          AdjView& lambda, const double* jvals,
-          const CheckpointBuffer& chk) const
+          AdjView& lambda, Kokkos::View<const double*, memory_space> jvals_view,
+          const CheckpointBuffer& chk, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const
       {
+          const double* jvals = jvals_view.data();
+          // Environment conditions must match the forward checkpoint so the
+          // recomputed Jacobian reflects the same rate law the state was
+          // integrated under.
+          const double Temp = temp;
+          const double RH = rh;
+          const double AirDensity = air_density;
+          (void)RH;  // Reserved for future deliquescence modeling
           const double g = 0.435866521508459;
 
           // --- Discrete Adjoint: backward integration over checkpointed steps ---
@@ -2460,61 +2590,61 @@ namespace mkpp::generated::saprc99_mini {
               const double S_15 = chk.state[step][15];
               const double S_16 = chk.state[step][16];
 
-              // Recompute Jacobian at checkpointed state (recompute-J strategy, D1)
+              // Recompute Jacobian at checkpointed state (recompute-J strategy)
               double J_4_4 = -1.0*jvals[1];
-              double J_5_5 = -5.779235214948339e-34*S_13*S_12;
-              double J_5_6 = 4.864965347266905e-32*S_13 + 1.7207046561730112e-12;
-              double J_5_9 = 1.597572121590464e-14*S_12;
-              double J_5_12 = -5.779235214948339e-34*S_13*S_5 + 1.597572121590464e-14*S_9;
-              double J_5_13 = 4.864965347266905e-32*S_6 - 5.779235214948339e-34*S_5*S_12;
-              double J_6_6 = -4.864965347266905e-32*S_13 - 1.7207046561730112e-12;
-              double J_6_13 = -4.864965347266905e-32*S_6;
-              double J_7_6 = 4.864965347266905e-32*S_13 + 1.7207046561730112e-12;
+              double J_5_5 = -4.9010355073085e-27*S_13*S_12*Kokkos::pow(Temp, -2.8);
+              double J_5_6 = 1.7e-33*S_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp);
+              double J_5_9 = 1.6e-11*S_12*Kokkos::exp(-2060.0/Temp);
+              double J_5_12 = -4.9010355073085e-27*S_13*S_5*Kokkos::pow(Temp, -2.8) + 1.6e-11*S_9*Kokkos::exp(-2060.0/Temp);
+              double J_5_13 = 1.7e-33*S_6*Kokkos::exp(1000.0/Temp) - 4.9010355073085e-27*S_5*S_12*Kokkos::pow(Temp, -2.8);
+              double J_6_6 = -1.7e-33*S_13*Kokkos::exp(1000.0/Temp) - 2.3e-13*Kokkos::exp(600.0/Temp);
+              double J_6_13 = -1.7e-33*S_6*Kokkos::exp(1000.0/Temp);
+              double J_7_6 = 1.7e-33*S_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp);
               double J_7_7 = -1.0*jvals[3];
-              double J_7_13 = 4.864965347266905e-32*S_6;
+              double J_7_13 = 1.7e-33*S_6*Kokkos::exp(1000.0/Temp);
               double J_8_4 = 1.0*jvals[1];
               double J_8_7 = 2.0*jvals[3];
-              double J_8_8 = -1.0*S_10*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-              double J_8_10 = -1.0*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13) + 1.0*jvals[2];
-              double J_8_13 = -1.0*S_10*S_8*(-9.105203433428452e-51*S_13/pow(4.2119062982869013e-19*S_13 + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*S_13 + 1.0));
-              double J_9_5 = 5.779235214948339e-34*S_13*S_12;
-              double J_9_9 = -1.8183951663749815e-14*S_11 - 3.5338644420317084e-17*S_15 - 7.98786060795232e-15*S_12;
-              double J_9_11 = -1.8183951663749815e-14*S_9;
-              double J_9_12 = 5.779235214948339e-34*S_13*S_5 - 7.98786060795232e-15*S_9;
-              double J_9_13 = 5.779235214948339e-34*S_5*S_12;
-              double J_9_15 = -3.5338644420317084e-17*S_9;
-              double J_10_8 = -1.0*S_10*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-              double J_10_10 = -1.0*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13) - 1.0*jvals[2];
-              double J_10_13 = -1.0*S_10*S_8*(-9.105203433428452e-51*S_13/pow(4.2119062982869013e-19*S_13 + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*S_13 + 1.0));
+              double J_8_8 = -1.0*S_10*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+              double J_8_10 = -1.0*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) + 1.0*jvals[2];
+              double J_8_13 = -1.0*S_10*S_8*(-8.80487804878049e-51*S_13*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0));
+              double J_9_5 = 4.9010355073085e-27*S_13*S_12*Kokkos::pow(Temp, -2.8);
+              double J_9_9 = -1.8e-12*S_11*Kokkos::exp(-1370.0/Temp) - 1.4e-13*S_15*Kokkos::exp(-2470.0/Temp) - 8e-12*S_12*Kokkos::exp(-2060.0/Temp);
+              double J_9_11 = -1.8e-12*S_9*Kokkos::exp(-1370.0/Temp);
+              double J_9_12 = 4.9010355073085e-27*S_13*S_5*Kokkos::pow(Temp, -2.8) - 8e-12*S_9*Kokkos::exp(-2060.0/Temp);
+              double J_9_13 = 4.9010355073085e-27*S_5*S_12*Kokkos::pow(Temp, -2.8);
+              double J_9_15 = -1.4e-13*S_9*Kokkos::exp(-2470.0/Temp);
+              double J_10_8 = -1.0*S_10*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+              double J_10_10 = -1.0*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) - 1.0*jvals[2];
+              double J_10_13 = -1.0*S_10*S_8*(-8.80487804878049e-51*S_13*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0));
               double J_11_4 = 1.0*jvals[1];
-              double J_11_9 = -1.8183951663749815e-14*S_11;
-              double J_11_11 = -2.6031661982774907e-11*S_14 - 1.8183951663749815e-14*S_9;
-              double J_11_14 = -2.6031661982774907e-11*S_11;
+              double J_11_9 = -1.8e-12*S_11*Kokkos::exp(-1370.0/Temp);
+              double J_11_11 = -1.8e-11*S_14*Kokkos::exp(110.0/Temp) - 1.8e-12*S_9*Kokkos::exp(-1370.0/Temp);
+              double J_11_14 = -1.8e-11*S_11*Kokkos::exp(110.0/Temp);
               double J_11_15 = 1.0*jvals[0];
-              double J_12_5 = -5.779235214948339e-34*S_13*S_12;
-              double J_12_9 = -7.98786060795232e-15*S_12;
-              double J_12_12 = -5.779235214948339e-34*S_13*S_5 - 7.98786060795232e-15*S_9;
-              double J_12_13 = -5.779235214948339e-34*S_5*S_12;
+              double J_12_5 = -4.9010355073085e-27*S_13*S_12*Kokkos::pow(Temp, -2.8);
+              double J_12_9 = -8e-12*S_12*Kokkos::exp(-2060.0/Temp);
+              double J_12_12 = -4.9010355073085e-27*S_13*S_5*Kokkos::pow(Temp, -2.8) - 8e-12*S_9*Kokkos::exp(-2060.0/Temp);
+              double J_12_13 = -4.9010355073085e-27*S_5*S_12*Kokkos::pow(Temp, -2.8);
               double J_12_15 = 1.0*jvals[0];
-              double J_14_8 = 1.0*S_10*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-              double J_14_9 = 3.5338644420317084e-17*S_15;
-              double J_14_10 = 1.0*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-              double J_14_11 = -2.6031661982774907e-11*S_14;
-              double J_14_13 = -7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/pow(7.709507080111506e-19*S_13 + 1.0, 2) + 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16/(7.709507080111506e-19*S_13 + 1.0) + 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16*log(7.709507080111506e-19*S_13)/((7.709507080111506e-19*S_13 + 1.0)*pow(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/pow(1.4174820557114162e-18*S_13 + 1.0, 2) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) - 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14*log(1.4174820557114162e-18*S_13)/((1.4174820557114162e-18*S_13 + 1.0)*pow(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 1.0*S_10*S_8*(-9.105203433428452e-51*S_13/pow(4.2119062982869013e-19*S_13 + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*S_13 + 1.0));
-              double J_14_14 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15/(1.4174820557114162e-18*S_13 + 1.0) - 2.6031661982774907e-11*S_11;
-              double J_14_15 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_14/(1.4174820557114162e-18*S_13 + 1.0) + 3.5338644420317084e-17*S_9;
-              double J_14_16 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13/(7.709507080111506e-19*S_13 + 1.0);
-              double J_15_9 = 1.8183951663749815e-14*S_11 - 3.5338644420317084e-17*S_15;
+              double J_14_8 = 1.0*S_10*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+              double J_14_9 = 1.4e-13*S_15*Kokkos::exp(-2470.0/Temp);
+              double J_14_10 = 1.0*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+              double J_14_11 = -1.8e-11*S_14*Kokkos::exp(110.0/Temp);
+              double J_14_13 = 3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0, 2) - 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp))/((1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) - 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0))) + 1.0*S_10*S_8*(-8.80487804878049e-51*S_13*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0));
+              double J_14_14 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 1.8e-11*S_11*Kokkos::exp(110.0/Temp);
+              double J_14_15 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 1.4e-13*S_9*Kokkos::exp(-2470.0/Temp);
+              double J_14_16 = 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
+              double J_15_9 = 1.8e-12*S_11*Kokkos::exp(-1370.0/Temp) - 1.4e-13*S_15*Kokkos::exp(-2470.0/Temp);
               double J_15_10 = 1.0*jvals[2];
-              double J_15_11 = 5.206332396554981e-11*S_14 + 1.8183951663749815e-14*S_9;
-              double J_15_13 = -7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/pow(7.709507080111506e-19*S_13 + 1.0, 2) + 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16/(7.709507080111506e-19*S_13 + 1.0) + 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16*log(7.709507080111506e-19*S_13)/((7.709507080111506e-19*S_13 + 1.0)*pow(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/pow(1.4174820557114162e-18*S_13 + 1.0, 2) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) - 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14*log(1.4174820557114162e-18*S_13)/((1.4174820557114162e-18*S_13 + 1.0)*pow(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10));
-              double J_15_14 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15/(1.4174820557114162e-18*S_13 + 1.0) + 5.206332396554981e-11*S_11;
-              double J_15_15 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_14/(1.4174820557114162e-18*S_13 + 1.0) - 3.5338644420317084e-17*S_9 - 1.0*jvals[0];
-              double J_15_16 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13/(7.709507080111506e-19*S_13 + 1.0);
-              double J_16_13 = 7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/pow(7.709507080111506e-19*S_13 + 1.0, 2) - 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16/(7.709507080111506e-19*S_13 + 1.0) - 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16*log(7.709507080111506e-19*S_13)/((7.709507080111506e-19*S_13 + 1.0)*pow(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) - 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/pow(1.4174820557114162e-18*S_13 + 1.0, 2) + 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) + 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14*log(1.4174820557114162e-18*S_13)/((1.4174820557114162e-18*S_13 + 1.0)*pow(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10));
-              double J_16_14 = 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15/(1.4174820557114162e-18*S_13 + 1.0);
-              double J_16_15 = 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_14/(1.4174820557114162e-18*S_13 + 1.0);
-              double J_16_16 = -10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13/(7.709507080111506e-19*S_13 + 1.0);
+              double J_15_11 = 3.6e-11*S_14*Kokkos::exp(110.0/Temp) + 1.8e-12*S_9*Kokkos::exp(-1370.0/Temp);
+              double J_15_13 = 3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0, 2) - 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp))/((1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) - 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0)));
+              double J_15_14 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 3.6e-11*S_11*Kokkos::exp(110.0/Temp);
+              double J_15_15 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 1.4e-13*S_9*Kokkos::exp(-2470.0/Temp) - 1.0*jvals[0];
+              double J_15_16 = 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
+              double J_16_13 = -3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0, 2) + 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp))/((1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) + 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) - 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) - 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0)));
+              double J_16_14 = 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0);
+              double J_16_15 = 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0);
+              double J_16_16 = -2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
 
               // Form iteration matrix W = (1/(gamma*h))*I - J
               // Block 0: species [N2, H2O, HNO4, HONO, O2, O3, AIR]
@@ -2946,9 +3076,17 @@ namespace mkpp::generated::saprc99_mini {
       template <class StateView, class PertView>
       KOKKOS_INLINE_FUNCTION void integrate_tlm(
           double dt_total, const StateView& state_0,
-          PertView& delta_C, const double* jvals,
-          const CheckpointBuffer& chk) const
+          PertView& delta_C, Kokkos::View<const double*, memory_space> jvals_view,
+          const CheckpointBuffer& chk, const double temp = 298.15, const double rh = 0.5, const double air_density = 2.46e+19) const
       {
+          const double* jvals = jvals_view.data();
+          // Environment conditions must match the forward checkpoint so the
+          // recomputed Jacobian reflects the same rate law the state was
+          // integrated under.
+          const double Temp = temp;
+          const double RH = rh;
+          const double AirDensity = air_density;
+          (void)RH;  // Reserved for future deliquescence modeling
           const double g = 0.435866521508459;
 
           // Local aliases for delta_C (TLM stages use dC_k naming)
@@ -2995,61 +3133,61 @@ namespace mkpp::generated::saprc99_mini {
               const double S_15 = chk.state[step][15];
               const double S_16 = chk.state[step][16];
 
-              // Recompute Jacobian at checkpointed state (recompute-J strategy, D1)
+              // Recompute Jacobian at checkpointed state (recompute-J strategy)
               double J_4_4 = -1.0*jvals[1];
-              double J_5_5 = -5.779235214948339e-34*S_13*S_12;
-              double J_5_6 = 4.864965347266905e-32*S_13 + 1.7207046561730112e-12;
-              double J_5_9 = 1.597572121590464e-14*S_12;
-              double J_5_12 = -5.779235214948339e-34*S_13*S_5 + 1.597572121590464e-14*S_9;
-              double J_5_13 = 4.864965347266905e-32*S_6 - 5.779235214948339e-34*S_5*S_12;
-              double J_6_6 = -4.864965347266905e-32*S_13 - 1.7207046561730112e-12;
-              double J_6_13 = -4.864965347266905e-32*S_6;
-              double J_7_6 = 4.864965347266905e-32*S_13 + 1.7207046561730112e-12;
+              double J_5_5 = -4.9010355073085e-27*S_13*S_12*Kokkos::pow(Temp, -2.8);
+              double J_5_6 = 1.7e-33*S_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp);
+              double J_5_9 = 1.6e-11*S_12*Kokkos::exp(-2060.0/Temp);
+              double J_5_12 = -4.9010355073085e-27*S_13*S_5*Kokkos::pow(Temp, -2.8) + 1.6e-11*S_9*Kokkos::exp(-2060.0/Temp);
+              double J_5_13 = 1.7e-33*S_6*Kokkos::exp(1000.0/Temp) - 4.9010355073085e-27*S_5*S_12*Kokkos::pow(Temp, -2.8);
+              double J_6_6 = -1.7e-33*S_13*Kokkos::exp(1000.0/Temp) - 2.3e-13*Kokkos::exp(600.0/Temp);
+              double J_6_13 = -1.7e-33*S_6*Kokkos::exp(1000.0/Temp);
+              double J_7_6 = 1.7e-33*S_13*Kokkos::exp(1000.0/Temp) + 2.3e-13*Kokkos::exp(600.0/Temp);
               double J_7_7 = -1.0*jvals[3];
-              double J_7_13 = 4.864965347266905e-32*S_6;
+              double J_7_13 = 1.7e-33*S_6*Kokkos::exp(1000.0/Temp);
               double J_8_4 = 1.0*jvals[1];
               double J_8_7 = 2.0*jvals[3];
-              double J_8_8 = -1.0*S_10*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-              double J_8_10 = -1.0*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13) + 1.0*jvals[2];
-              double J_8_13 = -1.0*S_10*S_8*(-9.105203433428452e-51*S_13/pow(4.2119062982869013e-19*S_13 + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*S_13 + 1.0));
-              double J_9_5 = 5.779235214948339e-34*S_13*S_12;
-              double J_9_9 = -1.8183951663749815e-14*S_11 - 3.5338644420317084e-17*S_15 - 7.98786060795232e-15*S_12;
-              double J_9_11 = -1.8183951663749815e-14*S_9;
-              double J_9_12 = 5.779235214948339e-34*S_13*S_5 - 7.98786060795232e-15*S_9;
-              double J_9_13 = 5.779235214948339e-34*S_5*S_12;
-              double J_9_15 = -3.5338644420317084e-17*S_9;
-              double J_10_8 = -1.0*S_10*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-              double J_10_10 = -1.0*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13) - 1.0*jvals[2];
-              double J_10_13 = -1.0*S_10*S_8*(-9.105203433428452e-51*S_13/pow(4.2119062982869013e-19*S_13 + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*S_13 + 1.0));
+              double J_8_8 = -1.0*S_10*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+              double J_8_10 = -1.0*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) + 1.0*jvals[2];
+              double J_8_13 = -1.0*S_10*S_8*(-8.80487804878049e-51*S_13*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0));
+              double J_9_5 = 4.9010355073085e-27*S_13*S_12*Kokkos::pow(Temp, -2.8);
+              double J_9_9 = -1.8e-12*S_11*Kokkos::exp(-1370.0/Temp) - 1.4e-13*S_15*Kokkos::exp(-2470.0/Temp) - 8e-12*S_12*Kokkos::exp(-2060.0/Temp);
+              double J_9_11 = -1.8e-12*S_9*Kokkos::exp(-1370.0/Temp);
+              double J_9_12 = 4.9010355073085e-27*S_13*S_5*Kokkos::pow(Temp, -2.8) - 8e-12*S_9*Kokkos::exp(-2060.0/Temp);
+              double J_9_13 = 4.9010355073085e-27*S_5*S_12*Kokkos::pow(Temp, -2.8);
+              double J_9_15 = -1.4e-13*S_9*Kokkos::exp(-2470.0/Temp);
+              double J_10_8 = -1.0*S_10*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+              double J_10_10 = -1.0*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp)) - 1.0*jvals[2];
+              double J_10_13 = -1.0*S_10*S_8*(-8.80487804878049e-51*S_13*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0));
               double J_11_4 = 1.0*jvals[1];
-              double J_11_9 = -1.8183951663749815e-14*S_11;
-              double J_11_11 = -2.6031661982774907e-11*S_14 - 1.8183951663749815e-14*S_9;
-              double J_11_14 = -2.6031661982774907e-11*S_11;
+              double J_11_9 = -1.8e-12*S_11*Kokkos::exp(-1370.0/Temp);
+              double J_11_11 = -1.8e-11*S_14*Kokkos::exp(110.0/Temp) - 1.8e-12*S_9*Kokkos::exp(-1370.0/Temp);
+              double J_11_14 = -1.8e-11*S_11*Kokkos::exp(110.0/Temp);
               double J_11_15 = 1.0*jvals[0];
-              double J_12_5 = -5.779235214948339e-34*S_13*S_12;
-              double J_12_9 = -7.98786060795232e-15*S_12;
-              double J_12_12 = -5.779235214948339e-34*S_13*S_5 - 7.98786060795232e-15*S_9;
-              double J_12_13 = -5.779235214948339e-34*S_5*S_12;
+              double J_12_5 = -4.9010355073085e-27*S_13*S_12*Kokkos::pow(Temp, -2.8);
+              double J_12_9 = -8e-12*S_12*Kokkos::exp(-2060.0/Temp);
+              double J_12_12 = -4.9010355073085e-27*S_13*S_5*Kokkos::pow(Temp, -2.8) - 8e-12*S_9*Kokkos::exp(-2060.0/Temp);
+              double J_12_13 = -4.9010355073085e-27*S_5*S_12*Kokkos::pow(Temp, -2.8);
               double J_12_15 = 1.0*jvals[0];
-              double J_14_8 = 1.0*S_10*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-              double J_14_9 = 3.5338644420317084e-17*S_15;
-              double J_14_10 = 1.0*S_8*(2.161777301914759e-32*S_13/(4.2119062982869013e-19*S_13 + 1.0) + 1.0018153870816924e-13);
-              double J_14_11 = -2.6031661982774907e-11*S_14;
-              double J_14_13 = -7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/pow(7.709507080111506e-19*S_13 + 1.0, 2) + 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16/(7.709507080111506e-19*S_13 + 1.0) + 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16*log(7.709507080111506e-19*S_13)/((7.709507080111506e-19*S_13 + 1.0)*pow(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/pow(1.4174820557114162e-18*S_13 + 1.0, 2) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) - 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14*log(1.4174820557114162e-18*S_13)/((1.4174820557114162e-18*S_13 + 1.0)*pow(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 1.0*S_10*S_8*(-9.105203433428452e-51*S_13/pow(4.2119062982869013e-19*S_13 + 1.0, 2) + 2.161777301914759e-32/(4.2119062982869013e-19*S_13 + 1.0));
-              double J_14_14 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15/(1.4174820557114162e-18*S_13 + 1.0) - 2.6031661982774907e-11*S_11;
-              double J_14_15 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_14/(1.4174820557114162e-18*S_13 + 1.0) + 3.5338644420317084e-17*S_9;
-              double J_14_16 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13/(7.709507080111506e-19*S_13 + 1.0);
-              double J_15_9 = 1.8183951663749815e-14*S_11 - 3.5338644420317084e-17*S_15;
+              double J_14_8 = 1.0*S_10*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+              double J_14_9 = 1.4e-13*S_15*Kokkos::exp(-2470.0/Temp);
+              double J_14_10 = 1.0*S_8*(1.9e-33*S_13*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0) + 7.2e-15*Kokkos::exp(785.0/Temp));
+              double J_14_11 = -1.8e-11*S_14*Kokkos::exp(110.0/Temp);
+              double J_14_13 = 3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0, 2) - 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp))/((1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) - 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0))) + 1.0*S_10*S_8*(-8.80487804878049e-51*S_13*Kokkos::exp(10.0/Temp)/Kokkos::pow(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0, 2) + 1.9e-33*Kokkos::exp(725.0/Temp)/(4.63414634146341e-18*S_13*Kokkos::exp(-715.0/Temp) + 1.0));
+              double J_14_14 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 1.8e-11*S_11*Kokkos::exp(110.0/Temp);
+              double J_14_15 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 1.4e-13*S_9*Kokkos::exp(-2470.0/Temp);
+              double J_14_16 = 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
+              double J_15_9 = 1.8e-12*S_11*Kokkos::exp(-1370.0/Temp) - 1.4e-13*S_15*Kokkos::exp(-2470.0/Temp);
               double J_15_10 = 1.0*jvals[2];
-              double J_15_11 = 5.206332396554981e-11*S_14 + 1.8183951663749815e-14*S_9;
-              double J_15_13 = -7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/pow(7.709507080111506e-19*S_13 + 1.0, 2) + 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16/(7.709507080111506e-19*S_13 + 1.0) + 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16*log(7.709507080111506e-19*S_13)/((7.709507080111506e-19*S_13 + 1.0)*pow(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) + 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/pow(1.4174820557114162e-18*S_13 + 1.0, 2) - 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) - 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14*log(1.4174820557114162e-18*S_13)/((1.4174820557114162e-18*S_13 + 1.0)*pow(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10));
-              double J_15_14 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15/(1.4174820557114162e-18*S_13 + 1.0) + 5.206332396554981e-11*S_11;
-              double J_15_15 = -2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_14/(1.4174820557114162e-18*S_13 + 1.0) - 3.5338644420317084e-17*S_9 - 1.0*jvals[0];
-              double J_15_16 = 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13/(7.709507080111506e-19*S_13 + 1.0);
-              double J_16_13 = 7.953589926046845e-06*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_16/pow(7.709507080111506e-19*S_13 + 1.0, 2) - 10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16/(7.709507080111506e-19*S_13 + 1.0) - 16475768690562.62*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_16*log(7.709507080111506e-19*S_13)/((7.709507080111506e-19*S_13 + 1.0)*pow(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10)) - 4.015816030220338e-48*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15*S_14/pow(1.4174820557114162e-18*S_13 + 1.0, 2) + 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14/(1.4174820557114162e-18*S_13 + 1.0) + 4.524445291995257e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_15*S_14*log(1.4174820557114162e-18*S_13)/((1.4174820557114162e-18*S_13 + 1.0)*pow(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0, 2)*(M_LN10 * M_LN10));
-              double J_16_14 = 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_15/(1.4174820557114162e-18*S_13 + 1.0);
-              double J_16_15 = 2.833063045870341e-30*pow(0.45, 1.0/(pow(log(1.4174820557114162e-18*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13*S_14/(1.4174820557114162e-18*S_13 + 1.0);
-              double J_16_16 = -10316599807742.686*pow(0.45, 1.0/(pow(log(7.709507080111506e-19*S_13), 2)/(M_LN10 * M_LN10) + 1.0))*S_13/(7.709507080111506e-19*S_13 + 1.0);
+              double J_15_11 = 3.6e-11*S_14*Kokkos::exp(110.0/Temp) + 1.8e-12*S_9*Kokkos::exp(-1370.0/Temp);
+              double J_15_13 = 3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0, 2) - 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp))/((1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) - 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) + 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) + 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0)));
+              double J_15_14 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 3.6e-11*S_11*Kokkos::exp(110.0/Temp);
+              double J_15_15 = -2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) - 1.4e-13*S_9*Kokkos::exp(-2470.0/Temp) - 1.0*jvals[0];
+              double J_15_16 = 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
+              double J_16_13 = -3.92e-48*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*S_14*Kokkos::exp(7.2/Temp)/Kokkos::pow(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0, 2) + 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0) + 4.47164309881952e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_15*S_14*Kokkos::exp(3.5/Temp)*Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp))/((1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0)*Kokkos::pow(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(Kokkos::log(10.0) * Kokkos::log(10.0))) + 2.66481679740968e-39*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_16*Kokkos::pow(Temp, 7.1)*Kokkos::exp(10920.0/Temp)/Kokkos::pow(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0, 2) - 2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0) - 3.41495283971347e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_16*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)*Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp))/(Kokkos::pow(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0, 2)*(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0)*(Kokkos::log(10.0) * Kokkos::log(10.0)));
+              double J_16_14 = 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_15*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0);
+              double J_16_15 = 2.8e-30*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.4e-18*S_13*Kokkos::exp(3.7/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*S_14*Kokkos::exp(3.5/Temp)/(1.4e-18*S_13*Kokkos::exp(3.7/Temp) + 1.0);
+              double J_16_16 = -2.13833433033195e-12*Kokkos::pow(0.45, 1.0/(Kokkos::pow(Kokkos::log(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp)), 2)/(Kokkos::log(10.0) * Kokkos::log(10.0)) + 1.0))*S_13*Kokkos::pow(Temp, 3.5)*Kokkos::exp(11000.0/Temp)/(1.24621148321367e-27*S_13*Kokkos::pow(Temp, 3.6)*Kokkos::exp(-80.0/Temp) + 1.0);
 
               // Form iteration matrix W = inv_g_h*I - J
               double W_0_0 = inv_g_h;

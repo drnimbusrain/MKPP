@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 from collections.abc import Mapping
@@ -81,20 +82,81 @@ def require_comparable_pairs(
     candidate_runs: tuple[SolverRun, ...],
     *,
     primary_cpu: bool = False,
+    minimum_blocks: int = 1,
 ) -> tuple[int, ...]:
     """Validate the immutable matching evidence required for a paired ratio."""
 
     if not baseline_runs or not candidate_runs:
         raise ValueError("paired comparison requires retained runs from both solvers")
+    if minimum_blocks < 1:
+        raise ValueError("minimum_blocks must be positive")
+    for runs in (baseline_runs, candidate_runs):
+        if len({run.block_id for run in runs}) != len(runs):
+            raise ValueError("duplicate block IDs cannot enter a paired ratio")
+        if len({run.run_id for run in runs}) != len(runs):
+            raise ValueError("duplicate run IDs cannot enter a paired ratio")
+        first = runs[0]
+        for run in runs:
+            if run.solver_id is not first.solver_id:
+                raise ValueError("each timing series must identify a single solver")
+            if (
+                run.campaign_id,
+                run.manifest,
+                run.scenario,
+                run.configuration,
+                run.build,
+                run.resources,
+                run.timing_boundary,
+                run.common_work_count,
+                run.repetition,
+                run.matching_key_sha256,
+            ) != (
+                first.campaign_id,
+                first.manifest,
+                first.scenario,
+                first.configuration,
+                first.build,
+                first.resources,
+                first.timing_boundary,
+                first.common_work_count,
+                first.repetition,
+                first.matching_key_sha256,
+            ):
+                raise ValueError(
+                    "timing series changed frozen evidence (matching key, resources, timing boundary, "
+                    "configuration, build, or workload) between blocks"
+                )
+            if (
+                not math.isfinite(run.elapsed_seconds)
+                or run.elapsed_seconds <= 0
+                or run.common_work_count <= 0
+                or not run.synchronized
+                or run.exclusion_reason is not None
+            ):
+                raise ValueError("invalid timing, work, synchronization, or exclusion evidence")
+    if baseline_runs[0].solver_id is candidate_runs[0].solver_id:
+        raise ValueError("paired comparison requires two distinct solvers")
+    if {run.run_id for run in baseline_runs} & {run.run_id for run in candidate_runs}:
+        raise ValueError("paired solver series must have disjoint run IDs")
     baseline_by_block = {run.block_id: run for run in baseline_runs}
     candidate_by_block = {run.block_id: run for run in candidate_runs}
     if set(baseline_by_block) != set(candidate_by_block):
         raise ValueError("paired comparison requires identical retained block IDs")
+    if len(baseline_by_block) < minimum_blocks:
+        raise ValueError(f"paired comparison requires at least {minimum_blocks} valid blocks")
     for block_id in sorted(baseline_by_block):
         baseline = baseline_by_block[block_id]
         candidate = candidate_by_block[block_id]
+        if baseline.order_position == candidate.order_position:
+            raise ValueError("paired solvers cannot occupy the same order position")
         if baseline.status is not RunStatus.SUCCESS or candidate.status is not RunStatus.SUCCESS:
             raise ValueError("failed or invalid runs cannot enter a paired ratio")
+        if baseline.campaign_id != candidate.campaign_id:
+            raise ValueError("paired runs have different campaign identity")
+        if baseline.manifest != candidate.manifest or baseline.scenario != candidate.scenario:
+            raise ValueError("paired runs have different manifest or scenario identity")
+        if baseline.build.precision != candidate.build.precision:
+            raise ValueError("paired runs have different precision")
         if baseline.matching_key_sha256 != candidate.matching_key_sha256:
             raise ValueError("paired runs have different matching key")
         if baseline.resources != candidate.resources:
@@ -105,6 +167,12 @@ def require_comparable_pairs(
             raise ValueError("paired runs have different common work count")
         if primary_cpu and (baseline.resources.physical_cores != 1 or baseline.resources.threads != 1):
             raise ValueError("primary CPU comparisons require one physical core and one thread")
+        if primary_cpu:
+            backend = baseline.resources.backend.lower().replace("_", "-")
+            if backend not in {"cpu", "serial-cpu", "serial", "host", "kokkos-serial", "openmp", "kokkos-openmp"}:
+                raise ValueError("primary CPU comparison requires a verified CPU backend")
+            if baseline.resources.affinity in {"unspecified", "external-policy", "none"}:
+                raise ValueError("primary CPU comparison requires observed physical-core affinity")
     return tuple(sorted(baseline_by_block))
 
 

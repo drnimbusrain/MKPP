@@ -35,18 +35,20 @@
       // Returns number of accepted steps, or -1 if MAX_STEPS exceeded.
       template <class StateView>
       KOKKOS_INLINE_FUNCTION int integrate_fwd_checkpoint(
-{% if has_equilibrium %}
-          double dt_total, StateView& state, const double* jvals,
-          CheckpointBuffer& chk, const double temp, const double rh{% if has_cloud_gated %}, const double clw{% endif %}) const
+{% if has_runtime_environment %}
+          double dt_total, StateView& state, Kokkos::View<const double*, memory_space> jvals_view,
+          CheckpointBuffer& chk, const double temp = {{ environment_temperature | default(300.0) }}, const double rh = 0.5{% if has_cloud_gated %}, const double clw = 0.0{% endif %}, const double air_density = {{ environment_air_density | default(2.4476e19) }}) const
 {% else %}
-          double dt_total, StateView& state, const double* jvals,
+          double dt_total, StateView& state, Kokkos::View<const double*, memory_space> jvals_view,
           CheckpointBuffer& chk) const
 {% endif %}
       {
+          const double* jvals = jvals_view.data();
           const int NUM_SPECIES = {{ num_species }};
-{% if has_equilibrium %}
+{% if has_runtime_environment %}
           const double Temp = temp;
           const double RH = rh;
+          const double AirDensity = air_density;
           (void)RH;  // Reserved for future deliquescence modeling
 {% if has_cloud_gated %}
           const double CLW = clw;

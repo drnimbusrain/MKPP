@@ -7,8 +7,9 @@ using namespace mkpp::host;
 
 struct DummyStandardSolver {
     bool integrate_called = false;
-    KOKKOS_INLINE_FUNCTION void integrate(double dt, Kokkos::View<double*, Kokkos::LayoutLeft> sub_state, const double* jvals) {
+    KOKKOS_INLINE_FUNCTION void integrate(double dt, Kokkos::View<double*, Kokkos::LayoutLeft> sub_state, JvalsView<Kokkos::HostSpace> jvals) {
         integrate_called = true;
+        (void)jvals;
         sub_state(0) += dt;
     }
 };
@@ -17,8 +18,9 @@ struct DummyEnvSolver {
     bool integrate_called = false;
     double temp_used = 0.0;
     double rh_used = 0.0;
-    KOKKOS_INLINE_FUNCTION void integrate(double dt, Kokkos::View<double*, Kokkos::LayoutLeft> sub_state, const double* jvals, double temp, double rh) {
+    KOKKOS_INLINE_FUNCTION void integrate(double dt, Kokkos::View<double*, Kokkos::LayoutLeft> sub_state, JvalsView<Kokkos::HostSpace> jvals, double temp, double rh) {
         integrate_called = true;
+        (void)jvals;
         temp_used = temp;
         rh_used = rh;
         sub_state(0) += dt * temp;
@@ -28,7 +30,7 @@ struct DummyEnvSolver {
 TEST(HostDispatcherTest, HostExecutionParamsDefaults) {
     HostExecutionParams params;
     EXPECT_DOUBLE_EQ(params.dt, 60.0);
-    EXPECT_EQ(params.jvals, nullptr);
+    EXPECT_EQ(params.jvals.data(), nullptr);
     EXPECT_DOUBLE_EQ(params.temp, 288.15);
     EXPECT_DOUBLE_EQ(params.rh, 0.5);
     EXPECT_EQ(params.steps, 1);
@@ -36,7 +38,11 @@ TEST(HostDispatcherTest, HostExecutionParamsDefaults) {
 
 TEST(HostDispatcherTest, TraitIntegrateCellStandard) {
     DummyStandardSolver solver;
-    HostExecutionParams params{30.0, nullptr, 290.0, 0.6, 1};
+    HostExecutionParams params;
+    params.dt = 30.0;
+    params.temp = 290.0;
+    params.rh = 0.6;
+    params.steps = 1;
     Kokkos::View<double*, Kokkos::LayoutLeft> state("state", 2);
     state(0) = 10.0;
 
@@ -48,7 +54,11 @@ TEST(HostDispatcherTest, TraitIntegrateCellStandard) {
 
 TEST(HostDispatcherTest, TraitIntegrateCellEnv) {
     DummyEnvSolver solver;
-    HostExecutionParams params{2.0, nullptr, 300.0, 0.8, 1};
+    HostExecutionParams params;
+    params.dt = 2.0;
+    params.temp = 300.0;
+    params.rh = 0.8;
+    params.steps = 1;
     Kokkos::View<double*, Kokkos::LayoutLeft> state("state", 2);
     state(0) = 5.0;
 
@@ -107,8 +117,7 @@ TEST(HostDispatcherTest, MechanismRegistryExecuteValid) {
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
-    Kokkos::initialize(argc, argv);
-    int result = RUN_ALL_TESTS();
-    Kokkos::finalize();
-    return result;
+    // Exception-safe runtime ownership; also consumes --kokkos-* tuning args (FR-013).
+    Kokkos::ScopeGuard kokkos_scope(argc, argv);
+    return RUN_ALL_TESTS();
 }

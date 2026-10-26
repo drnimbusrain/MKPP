@@ -164,3 +164,8 @@ def test_non_finite_reference_attempt_cannot_qualify(bad_value: float) -> None:
 
     assert not qualification.qualified
     assert any("finite" in message.lower() for message in qualification.diagnostics)
+
+
+def test_empty_reference_state_is_rejected_without_division_by_zero():
+    with pytest.raises(ValueError, match="must not be empty"):
+        assess_reference_convergence({1.0: {}}, {1.0: {}}, {}, 1e-6)

@@ -10,6 +10,12 @@ MKPP (Multiphase Kinetic PreProcessor) is a highly optimized, Ahead-Of-Time (AOT
 - **SAPRC** mechanisms (`saprc99.yaml`, `saprcnov.yaml`)
 
 ## Building and Testing
+
+Kokkos **5.1.1 or newer** is required. The C++ host interface does not require a
+Fortran compiler; Fortran is needed only for targets that compile Fortran code.
+CPU builds compile generated chemistry helpers separately by default; see
+[build-time guidance](docs/how-to/reduce-native-build-times.md).
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate

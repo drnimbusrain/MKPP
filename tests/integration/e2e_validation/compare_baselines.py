@@ -73,7 +73,7 @@ def main():
         state_list = [1.0e10] * max(num_species + 10, 200)
 
         jacobian_content = content
-        jacobian_path = Path(args.hpp).with_suffix("") / "jacobian.cpp"
+        jacobian_path = Path(args.hpp).with_suffix("") / "jacobian.hpp"
         if jacobian_path.is_file():
             jacobian_content = jacobian_path.read_text()
 
@@ -92,12 +92,23 @@ def main():
             r"jacobian\[(\d+)\s*\*\s*(\d+)\s*\+\s*(\d+)\]\s*=\s*(.+?);",
             jac_body,
         )
+        # Layout-aware accessor emission (feature 024, US1): the generated
+        # Jacobian block is written through a two-index accessor rather than a
+        # flattened pointer, e.g. "jacobian(0, 3) = ...;".
+        matches_accessor = re.findall(
+            r"jacobian\((\d+)\s*,\s*(\d+)\)\s*=\s*(.+?);",
+            jac_body,
+        )
+        matches_slots = re.findall(
+            r"jacobian\.at_slot\(\d+\s*,\s*(\d+)\s*,\s*(\d+)\)\s*=\s*(.+?);",
+            jac_body,
+        )
         matches_2d = re.findall(
             r"J_block\((?:Species::)?([a-zA-Z0-9_]+),\s*(?:Species::)?([a-zA-Z0-9_]+)\)\s*=\s*(.+?);",
             jac_body,
         )
 
-        if not matches_1d and not matches_2d and not matches_compiled:
+        if not matches_1d and not matches_2d and not matches_compiled and not matches_accessor and not matches_slots:
             print("No Jacobian block found in HPP!", file=sys.stderr)
             sys.exit(1)
 
@@ -105,6 +116,16 @@ def main():
         if matches_1d:
             for idx_str, eqn in matches_1d:
                 idx = int(idx_str)
+                val = eval_jacobian_eqn(eqn, state_list, local_vars=local_vars)
+                computed_J[idx] = val
+        elif matches_accessor:
+            for row_str, col_str, eqn in matches_accessor:
+                idx = int(row_str) * num_species + int(col_str)
+                val = eval_jacobian_eqn(eqn, state_list, local_vars=local_vars)
+                computed_J[idx] = val
+        elif matches_slots:
+            for row_str, col_str, eqn in matches_slots:
+                idx = int(row_str) * num_species + int(col_str)
                 val = eval_jacobian_eqn(eqn, state_list, local_vars=local_vars)
                 computed_J[idx] = val
         elif matches_compiled:

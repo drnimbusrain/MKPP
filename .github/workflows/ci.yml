@@ -150,18 +150,21 @@ jobs:
     name: 4. C++ Core Build
     needs: aot-codegen
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/bbakernoaa/mkpp-ci-env:latest
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build CI Environment Image
+        run: docker build -f .github/docker/Dockerfile.ci -t mkpp-ci-env:ci .
 
       - name: Configure CMake
-        run: cmake --preset default -DKokkos_ROOT=/opt/kokkos
+        run: docker run --rm -v "$PWD:/workspace" -w /workspace mkpp-ci-env:ci cmake --preset default -DKokkos_ROOT=/opt/kokkos
 
       - name: Build C++ Core
-        run: cmake --build --preset default
+        run: docker run --rm -v "$PWD:/workspace" -w /workspace mkpp-ci-env:ci cmake --build --preset default
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
@@ -174,14 +177,17 @@ jobs:
     name: 5. Test Gates
     needs: build-cpp
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/bbakernoaa/mkpp-ci-env:latest
     env:
       PYTHONPATH: ${{ github.workspace }}/src
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build CI Environment Image
+        run: docker build -f .github/docker/Dockerfile.ci -t mkpp-ci-env:ci .
 
       - name: Download Build Artifacts
         uses: actions/download-artifact@v4
@@ -198,10 +204,39 @@ jobs:
         # import the mkpp package itself.  The CI image pre-bakes pytest,
         # pytest-xdist, and jsonschema; this step installs the editable mkpp
         # so PYTHONPATH-less imports resolve consistently.
-        run: pip3 install --no-build-isolation -e .
+        run: docker run --rm -v "$PWD:/workspace" -w /workspace mkpp-ci-env:ci pip3 install --no-build-isolation -e .
 
       - name: Run C++ CTests
-        run: ctest --preset default --output-on-failure
+        run: docker run --rm -v "$PWD:/workspace" -w /workspace -e PYTHONPATH="$GITHUB_WORKSPACE/src" mkpp-ci-env:ci ctest --preset default --output-on-failure
 
       - name: Run Python AOT Tests
-        run: pytest tests/python/ -ra -q --strict-markers
+        run: docker run --rm -v "$PWD:/workspace" -w /workspace -e PYTHONPATH="$GITHUB_WORKSPACE/src" mkpp-ci-env:ci pytest tests/python/ -ra -q --strict-markers
+
+  device-gate:
+    name: 6. Device Compile + Parity (optional)
+    # Optional and hardware-gated: only runs on a self-hosted runner with an
+    # accelerator. On ordinary host-only runners the device compile gate is not
+    # built and the runtime parity test reports device-unverified, so this job
+    # is allowed to be non-authoritative and never blocks a merge. The five
+    # validation states (host-compiled, host-executed, device-compiled,
+    # device-executed, device-unverified) are emitted by the test binaries.
+    needs: test-gates
+    if: ${{ vars.MKPP_DEVICE_RUNNER == 'true' }}
+    runs-on: [self-hosted, gpu]
+    continue-on-error: true
+    container:
+      image: ghcr.io/bbakernoaa/mkpp-ci-env:latest
+      options: --gpus all
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure Device Preset
+        run: cmake --preset device -DKokkos_ROOT=/opt/kokkos
+
+      - name: Build Device Gate
+        run: cmake --build --preset device
+
+      - name: Run Device Compile Gate + Runtime Parity
+        run: ctest --test-dir build-device -R 'DeviceCompileGate|DeviceRuntimeParity' --output-on-failure
